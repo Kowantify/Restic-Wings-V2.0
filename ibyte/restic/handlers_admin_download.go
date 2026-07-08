@@ -17,6 +17,7 @@ import (
 var subsetRE = regexp.MustCompile(`^[0-9]+/[0-9]+$`)
 const largeDownloadThresholdBytes int64 = 10 * 1024 * 1024 * 1024
 const snapshotStatsTimeout = 45 * time.Second
+const largeDownloadRetention = 24 * time.Hour
 
 type statsResponse struct {
     TotalSize             int64  `json:"total_size"`
@@ -58,6 +59,7 @@ func prepareDownload(c *gin.Context) {
     setJob(key, jobState{Status: "running", StartedAt: &started})
     go func() {
         cleanupOldTempDirs(24 * time.Hour)
+        cleanupOldSFTPArchives(volume, largeDownloadRetention)
         base, _ := cleanUnder(tempRoot(), filepath.Join(tempRoot(), sid+"-"+snapshotID))
         restoreDir := filepath.Join(base, "restore")
         tempArchivePath := filepath.Join(base, "backup.tar.zst")
@@ -151,6 +153,7 @@ func prepareDownload(c *gin.Context) {
             return
         }
         if largeDownload {
+            expiresAt := finished.Add(largeDownloadRetention)
             setJob(key, jobState{
                 Status:     "sftp_ready",
                 Message:    "backup archive was placed in the server files for SFTP download",
@@ -163,9 +166,16 @@ func prepareDownload(c *gin.Context) {
                     "size_source":    sizeSource,
                     "archive_format": "tar.zst",
                     "large_download": true,
+                    "expires_at":     expiresAt.Format(time.RFC3339),
                 },
             })
             _ = os.RemoveAll(base)
+            go func(path string) {
+                time.Sleep(largeDownloadRetention)
+                if safeArchivePath, err := cleanUnder(volume, path); err == nil {
+                    _ = os.Remove(safeArchivePath)
+                }
+            }(archivePath)
             return
         }
         setJob(key, jobState{Status: "ready", Message: "archive ready", StartedAt: &started, FinishedAt: &finished, Result: map[string]any{"path": archivePath, "size_bytes": estimatedBytes, "size_source": sizeSource, "archive_format": "tar.zst"}})

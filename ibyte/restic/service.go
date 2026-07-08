@@ -195,6 +195,32 @@ func cleanupOldTempDirs(maxAge time.Duration) {
     }
 }
 
+func cleanupOldSFTPArchives(volume string, maxAge time.Duration) {
+    entries, err := os.ReadDir(volume)
+    if err != nil {
+        return
+    }
+    cutoff := time.Now().Add(-maxAge)
+    for _, entry := range entries {
+        if entry.IsDir() {
+            continue
+        }
+        name := entry.Name()
+        if !strings.HasPrefix(name, "restic-backup-") || !strings.HasSuffix(name, ".tar.zst") {
+            continue
+        }
+        info, err := entry.Info()
+        if err != nil || !info.ModTime().Before(cutoff) {
+            continue
+        }
+        path, err := cleanUnder(volume, filepath.Join(volume, name))
+        if err != nil {
+            continue
+        }
+        _ = os.Remove(path)
+    }
+}
+
 func runRestic(ctx context.Context, repo, key string, args ...string) ([]byte, []byte, error) {
     return runResticInDir(ctx, "", repo, key, args...)
 }
