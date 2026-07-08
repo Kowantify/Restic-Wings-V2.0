@@ -189,7 +189,13 @@ func restoreBackup(c *gin.Context) {
             setJob(key, jobState{Status: "failed", Message: err.Error(), StartedAt: &started, FinishedAt: &finished})
             return
         }
-        _, stderr, err := runRestic(ctx, repo, req.EncryptionKey, "restore", snapshotID, "--target", volume)
+        restoreTarget, err := restoreTargetForSnapshot(ctx, repo, req.EncryptionKey, snapshotID, volume)
+        if err != nil {
+            finished := time.Now().UTC()
+            setJob(key, jobState{Status: "failed", Message: err.Error(), StartedAt: &started, FinishedAt: &finished})
+            return
+        }
+        _, stderr, err := runRestic(ctx, repo, req.EncryptionKey, "restore", snapshotID, "--target", restoreTarget)
         finished := time.Now().UTC()
         if err != nil {
             setJob(key, jobState{Status: "failed", Message: string(stderr), StartedAt: &started, FinishedAt: &finished})
@@ -202,6 +208,45 @@ func restoreBackup(c *gin.Context) {
 
 func restoreStatus(c *gin.Context) {
     c.JSON(http.StatusOK, getJob(jobKey(serverID(c), "restore")))
+}
+
+func restoreTargetForSnapshot(ctx context.Context, repo, key, snapshotID, volume string) (string, error) {
+    snaps, err := listSnapshots(ctx, repo, key)
+    if err != nil {
+        return "", err
+    }
+
+    var selected *snapshot
+    for i := range snaps {
+        if snaps[i].ID == snapshotID || snaps[i].ShortID == snapshotID {
+            selected = &snaps[i]
+            break
+        }
+    }
+    if selected == nil {
+        return "", fmt.Errorf("snapshot was not found")
+    }
+
+    hasAbsolute := false
+    hasRelative := false
+    for _, path := range selected.Paths {
+        if filepath.IsAbs(path) {
+            hasAbsolute = true
+            if !isUnderOrEqual(volume, path) {
+                return "", fmt.Errorf("snapshot contains a path outside this server volume")
+            }
+        } else {
+            hasRelative = true
+        }
+    }
+
+    if hasAbsolute && hasRelative {
+        return "", fmt.Errorf("snapshot mixes absolute and relative paths")
+    }
+    if hasAbsolute {
+        return string(filepath.Separator), nil
+    }
+    return volume, nil
 }
 
 func deleteBackup(c *gin.Context) {

@@ -109,6 +109,21 @@ func repoRoot() string {
 }
 
 func cleanUnder(root, child string) (string, error) {
+    path, err := cleanUnderOrEqual(root, child)
+    if err != nil {
+        return "", err
+    }
+    rootAbs, err := filepath.Abs(root)
+    if err != nil {
+        return "", err
+    }
+    if path == rootAbs {
+        return "", errors.New("unsafe path")
+    }
+    return path, nil
+}
+
+func cleanUnderOrEqual(root, child string) (string, error) {
     rootAbs, err := filepath.Abs(root)
     if err != nil {
         return "", err
@@ -121,10 +136,15 @@ func cleanUnder(root, child string) (string, error) {
     if err != nil {
         return "", err
     }
-    if rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+    if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
         return "", errors.New("unsafe path")
     }
     return childAbs, nil
+}
+
+func isUnderOrEqual(root, child string) bool {
+    _, err := cleanUnderOrEqual(root, child)
+    return err == nil
 }
 
 func repoPath(serverID, owner string) (string, error) {
@@ -378,7 +398,16 @@ func restoredVolumeSource(restoreDir, originalVolume, serverID string) (string, 
         return found, nil
     }
 
+    if hasDirectoryEntries(restoreDir) {
+        return restoreDir, nil
+    }
+
     return "", errors.New("restored server volume was not found")
+}
+
+func hasDirectoryEntries(path string) bool {
+    entries, err := os.ReadDir(path)
+    return err == nil && len(entries) > 0
 }
 
 func serverID(c *gin.Context) string {
