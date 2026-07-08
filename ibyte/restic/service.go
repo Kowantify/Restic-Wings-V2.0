@@ -32,6 +32,7 @@ type resticRequest struct {
 	OwnerUsername string `json:"owner_username" form:"owner_username"`
 	EncryptionKey string `json:"encryption_key" form:"encryption_key"`
 	MaxBackups    int    `json:"max_backups" form:"max_backups"`
+	MaxRepoBytes  int64  `json:"max_repo_bytes" form:"max_repo_bytes"`
 	Limit         int    `json:"limit" form:"limit"`
 	Cursor        string `json:"cursor" form:"cursor"`
 	Since         string `json:"since" form:"since"`
@@ -221,6 +222,42 @@ func cleanupOldSFTPArchives(volume string, maxAge time.Duration) {
     }
 }
 
+func cleanupSFTPArchives(volume string) {
+    entries, err := os.ReadDir(volume)
+    if err != nil {
+        return
+    }
+    for _, entry := range entries {
+        if entry.IsDir() {
+            continue
+        }
+        name := entry.Name()
+        if !strings.HasPrefix(name, "restic-backup-") || !strings.HasSuffix(name, ".tar.zst") {
+            continue
+        }
+        path, err := cleanUnder(volume, filepath.Join(volume, name))
+        if err != nil {
+            continue
+        }
+        _ = os.Remove(path)
+    }
+}
+
+func repoDiskSize(repo string) (int64, error) {
+    var total int64
+    err := filepath.Walk(repo, func(_ string, info os.FileInfo, err error) error {
+        if err != nil {
+            return err
+        }
+        if info == nil || info.IsDir() {
+            return nil
+        }
+        total += info.Size()
+        return nil
+    })
+    return total, err
+}
+
 func runRestic(ctx context.Context, repo, key string, args ...string) ([]byte, []byte, error) {
     return runResticInDir(ctx, "", repo, key, args...)
 }
@@ -375,6 +412,46 @@ func enforceBackupLimit(ctx context.Context, repo, key string, max int) error {
         }
     }
     return nil
+}
+
+func enforceRepoSizeLimit(ctx context.Context, repo, key string, maxBytes int64) error {
+    if maxBytes < 1 {
+        return nil
+    }
+    for {
+        size, err := repoDiskSize(repo)
+        if err != nil {
+            return err
+        }
+        if size <= maxBytes {
+            return nil
+        }
+
+        snaps, err := listSnapshots(ctx, repo, key)
+        if err != nil {
+            return err
+        }
+
+        var victim *snapshot
+        for i := len(snaps) - 1; i >= 0; i-- {
+            if !snaps[i].Locked {
+                victim = &snaps[i]
+                break
+            }
+        }
+        if victim == nil {
+            return fmt.Errorf("repo size %d bytes exceeds limit %d bytes, and all snapshots are locked", size, maxBytes)
+        }
+
+        id := victim.ID
+        if id == "" {
+            id = victim.ShortID
+        }
+        _, stderr, err := runRestic(ctx, repo, key, "forget", id, "--prune")
+        if err != nil {
+            return fmt.Errorf("failed enforcing repo size retention: %s", string(stderr))
+        }
+    }
 }
 
 func setJob(key string, state jobState) {

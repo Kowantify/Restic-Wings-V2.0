@@ -40,6 +40,7 @@ func createBackup(c *gin.Context) {
         defer lock.Unlock()
         ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
         defer cancel()
+        cleanupSFTPArchives(volume)
         if err := ensureRepo(ctx, repo, req.EncryptionKey); err != nil {
             return nil, err
         }
@@ -48,6 +49,9 @@ func createBackup(c *gin.Context) {
             return nil, fmt.Errorf("restic backup failed: %s", string(stderr))
         }
         if err := enforceBackupLimit(ctx, repo, req.EncryptionKey, req.MaxBackups); err != nil {
+            return nil, err
+        }
+        if err := enforceRepoSizeLimit(ctx, repo, req.EncryptionKey, req.MaxRepoBytes); err != nil {
             return nil, err
         }
         return map[string]any{"output": strings.TrimSpace(string(stdout)), "repo": filepath.Base(repo)}, nil
@@ -191,6 +195,7 @@ func restoreBackup(c *gin.Context) {
         defer lock.Unlock()
         ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
         defer cancel()
+        cleanupSFTPArchives(volume)
         if err := os.MkdirAll(volume, 0o755); err != nil {
             finished := time.Now().UTC()
             setJob(key, jobState{Status: "failed", Message: err.Error(), StartedAt: &started, FinishedAt: &finished})

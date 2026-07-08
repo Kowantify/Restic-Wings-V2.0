@@ -58,8 +58,12 @@ func prepareDownload(c *gin.Context) {
     key := jobKey(sid, "prepare:"+snapshotID)
     setJob(key, jobState{Status: "running", StartedAt: &started})
     go func() {
+        lock := lockForServer(sid)
+        lock.Lock()
+        defer lock.Unlock()
         cleanupOldTempDirs(24 * time.Hour)
         cleanupOldSFTPArchives(volume, largeDownloadRetention)
+        cleanupSFTPArchives(volume)
         base, _ := cleanUnder(tempRoot(), filepath.Join(tempRoot(), sid+"-"+snapshotID))
         restoreDir := filepath.Join(base, "restore")
         tempArchivePath := filepath.Join(base, "backup.tar.zst")
