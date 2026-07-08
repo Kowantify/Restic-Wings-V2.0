@@ -1,0 +1,1 @@
+- { Signature: "restic-schedule-run", Description: "Run restic backup schedules", Path: "restic_schedule_runner.php", Interval: "everyMinute" }
