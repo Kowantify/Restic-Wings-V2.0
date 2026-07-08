@@ -271,6 +271,14 @@ func lockForServer(serverID string) *sync.Mutex {
 }
 
 func writeTarGz(source, target string) error {
+    return writeTarGzWithRoot(source, target, "")
+}
+
+func writeTarGzWithRoot(source, target, rootName string) error {
+    rootName = strings.Trim(filepath.ToSlash(rootName), "/")
+    if rootName != "" && (!safeID.MatchString(rootName) || strings.Contains(rootName, "..")) {
+        return errors.New("invalid archive root name")
+    }
     if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
         return err
     }
@@ -289,7 +297,15 @@ func writeTarGz(source, target string) error {
             return err
         }
         if path == source {
-            return nil
+            if rootName == "" {
+                return nil
+            }
+            header, err := tar.FileInfoHeader(info, "")
+            if err != nil {
+                return err
+            }
+            header.Name = rootName
+            return tarWriter.WriteHeader(header)
         }
         rel, err := filepath.Rel(source, path)
         if err != nil {
@@ -300,6 +316,9 @@ func writeTarGz(source, target string) error {
             return err
         }
         header.Name = filepath.ToSlash(rel)
+        if rootName != "" {
+            header.Name = filepath.ToSlash(filepath.Join(rootName, rel))
+        }
         if err := tarWriter.WriteHeader(header); err != nil {
             return err
         }
@@ -314,6 +333,45 @@ func writeTarGz(source, target string) error {
         _, err = io.Copy(tarWriter, in)
         return err
     })
+}
+
+func restoredVolumeSource(restoreDir, originalVolume, serverID string) (string, error) {
+    cleanedVolume := filepath.Clean(originalVolume)
+    relativeVolume := strings.TrimPrefix(cleanedVolume, string(filepath.Separator))
+
+    candidates := []string{
+        filepath.Join(restoreDir, relativeVolume),
+        filepath.Join(restoreDir, serverID),
+    }
+
+    for _, candidate := range candidates {
+        path, err := cleanUnder(restoreDir, candidate)
+        if err != nil {
+            continue
+        }
+        if info, err := os.Stat(path); err == nil && info.IsDir() {
+            return path, nil
+        }
+    }
+
+    var found string
+    _ = filepath.Walk(restoreDir, func(path string, info os.FileInfo, err error) error {
+        if err != nil || info == nil || !info.IsDir() || found != "" {
+            return nil
+        }
+        if filepath.Base(path) == serverID {
+            if safe, err := cleanUnder(restoreDir, path); err == nil {
+                found = safe
+                return filepath.SkipDir
+            }
+        }
+        return nil
+    })
+    if found != "" {
+        return found, nil
+    }
+
+    return "", errors.New("restored server volume was not found")
 }
 
 func serverID(c *gin.Context) string {

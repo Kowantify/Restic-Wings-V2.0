@@ -46,6 +46,11 @@ func prepareDownload(c *gin.Context) {
         errorJSON(c, http.StatusBadRequest, err.Error())
         return
     }
+    volume, err := volumePath(sid)
+    if err != nil {
+        errorJSON(c, http.StatusBadRequest, err.Error())
+        return
+    }
     started := time.Now().UTC()
     key := jobKey(sid, "prepare:"+snapshotID)
     setJob(key, jobState{Status: "running", StartedAt: &started})
@@ -59,7 +64,12 @@ func prepareDownload(c *gin.Context) {
         defer cancel()
         _, stderr, err := runRestic(ctx, repo, req.EncryptionKey, "restore", snapshotID, "--target", restoreDir)
         if err == nil {
-            err = writeTarGz(restoreDir, archivePath)
+            archiveSource, sourceErr := restoredVolumeSource(restoreDir, volume, sid)
+            if sourceErr != nil {
+                err = sourceErr
+            } else {
+                err = writeTarGzWithRoot(archiveSource, archivePath, sid)
+            }
         }
         _ = os.RemoveAll(restoreDir)
         finished := time.Now().UTC()
