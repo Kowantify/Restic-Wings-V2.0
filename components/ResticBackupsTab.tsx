@@ -485,7 +485,7 @@ const ResticBackupsTab: React.FC = () => {
       }
 
       setDownloadNotice(forceSftp
-        ? 'Preparing a temporary .tar.zst file in this server\'s files for SFTP download.'
+        ? 'Preparing a temporary .zip file in this server\'s files for SFTP download.'
         : 'Backups over 5GB are automatically prepared for SFTP download. Smaller backups can stream through the panel.'
       );
 
@@ -543,7 +543,7 @@ const ResticBackupsTab: React.FC = () => {
                 : 'about 24 hours after it was created';
               setDownloadNotice(
                 <div css={tw`space-y-1`}>
-                  <div>This backup was packaged as a temporary .tar.zst file in this server&apos;s files for SFTP download.</div>
+                  <div>This backup was packaged as a temporary .zip file in this server&apos;s files for SFTP download.</div>
                   <div>File: <code css={tw`text-neutral-200`}>{sftpPath}</code></div>
                   {sftpUser && sftpHost ? (
                     <div>Login: <code css={tw`text-neutral-200`}>{sftpUser}@{sftpHost}:{sftpPort || 2022}</code></div>

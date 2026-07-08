@@ -99,7 +99,6 @@ need git
 need perl
 
 install_runtime_tool restic restic
-install_runtime_tool zstd zstd
 
 if ! go_is_new_enough; then
   install_go

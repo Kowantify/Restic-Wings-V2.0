@@ -1449,7 +1449,7 @@ class resticbackupsExtensionController extends Controller
 
             $headers = [
                 'Content-Type' => $resp->getHeaderLine('Content-Type') ?: 'application/octet-stream',
-                'Content-Disposition' => $resp->getHeaderLine('Content-Disposition') ?: ('attachment; filename="backup-' . $backupId . '.tar.gz"'),
+                'Content-Disposition' => $resp->getHeaderLine('Content-Disposition') ?: ('attachment; filename="backup-' . $backupId . '.zip"'),
                 'X-Accel-Buffering' => 'no',
                 'Cache-Control' => 'no-store',
             ];
