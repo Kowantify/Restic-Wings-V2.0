@@ -43,7 +43,7 @@ func createBackup(c *gin.Context) {
         if err := ensureRepo(ctx, repo, req.EncryptionKey); err != nil {
             return nil, err
         }
-        stdout, stderr, err := runRestic(ctx, repo, req.EncryptionKey, "backup", volume, "--json", "--tag", "pterodactyl", "--tag", sid)
+        stdout, stderr, err := runRestic(ctx, repo, req.EncryptionKey, "backup", volume, "--json", "--tag", "pterodactyl", "--tag", sid, "--exclude", filepath.Join(volume, "restic-backup-*.tar.zst"))
         if err != nil {
             return nil, fmt.Errorf("restic backup failed: %s", string(stderr))
         }

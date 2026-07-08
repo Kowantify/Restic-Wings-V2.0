@@ -169,6 +169,32 @@ func tempRoot() string {
     return filepath.Join(repoRoot(), "temp")
 }
 
+func cleanupOldTempDirs(maxAge time.Duration) {
+    root := tempRoot()
+    entries, err := os.ReadDir(root)
+    if err != nil {
+        return
+    }
+    cutoff := time.Now().Add(-maxAge)
+    for _, entry := range entries {
+        if !entry.IsDir() {
+            continue
+        }
+        path := filepath.Join(root, entry.Name())
+        safe, err := cleanUnder(root, path)
+        if err != nil {
+            continue
+        }
+        info, err := entry.Info()
+        if err != nil {
+            continue
+        }
+        if info.ModTime().Before(cutoff) {
+            _ = os.RemoveAll(safe)
+        }
+    }
+}
+
 func runRestic(ctx context.Context, repo, key string, args ...string) ([]byte, []byte, error) {
     return runResticInDir(ctx, "", repo, key, args...)
 }
@@ -360,6 +386,102 @@ func writeTarGzWithRoot(source, target, rootName string) error {
         _, err = io.Copy(tarWriter, in)
         return err
     })
+}
+
+func writeTarZstWithRoot(source, target, rootName string) error {
+    rootName = strings.Trim(filepath.ToSlash(rootName), "/")
+    if rootName != "" && (!safeID.MatchString(rootName) || strings.Contains(rootName, "..")) {
+        return errors.New("invalid archive root name")
+    }
+    if _, err := exec.LookPath("zstd"); err != nil {
+        return errors.New("zstd is not installed")
+    }
+    if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+        return err
+    }
+
+    cmd := exec.Command("zstd", "-T0", "-3", "-q", "-f", "-o", target, "-")
+    stdin, err := cmd.StdinPipe()
+    if err != nil {
+        return err
+    }
+    cmd.Stderr = os.Stderr
+    if err := cmd.Start(); err != nil {
+        _ = stdin.Close()
+        return err
+    }
+
+    tarWriter := tar.NewWriter(stdin)
+    walkErr := filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+        if err != nil {
+            return err
+        }
+        if path == source {
+            if rootName == "" {
+                return nil
+            }
+            header, err := tar.FileInfoHeader(info, "")
+            if err != nil {
+                return err
+            }
+            header.Name = rootName
+            return tarWriter.WriteHeader(header)
+        }
+        rel, err := filepath.Rel(source, path)
+        if err != nil {
+            return err
+        }
+        header, err := tar.FileInfoHeader(info, "")
+        if err != nil {
+            return err
+        }
+        header.Name = filepath.ToSlash(rel)
+        if rootName != "" {
+            header.Name = filepath.ToSlash(filepath.Join(rootName, rel))
+        }
+        if err := tarWriter.WriteHeader(header); err != nil {
+            return err
+        }
+        if info.IsDir() {
+            return nil
+        }
+        in, err := os.Open(path)
+        if err != nil {
+            return err
+        }
+        defer in.Close()
+        _, err = io.Copy(tarWriter, in)
+        return err
+    })
+
+    closeErr := tarWriter.Close()
+    pipeErr := stdin.Close()
+    waitErr := cmd.Wait()
+    if walkErr != nil {
+        return walkErr
+    }
+    if closeErr != nil {
+        return closeErr
+    }
+    if pipeErr != nil {
+        return pipeErr
+    }
+    return waitErr
+}
+
+func directorySize(path string) (int64, error) {
+    var total int64
+    err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+        if err != nil {
+            return err
+        }
+        if info == nil || info.IsDir() {
+            return nil
+        }
+        total += info.Size()
+        return nil
+    })
+    return total, err
 }
 
 func restoredVolumeSource(restoreDir, originalVolume, serverID string) (string, error) {

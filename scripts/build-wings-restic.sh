@@ -69,8 +69,37 @@ go_is_new_enough() {
   esac
 }
 
+install_runtime_tool() {
+  local package="$1"
+  local binary="$2"
+
+  if command -v "$binary" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Installing $package runtime dependency"
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y "$package"
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y "$package"
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache "$package"
+  else
+    echo "Could not install $package automatically. Please install it and rerun this script." >&2
+    exit 1
+  fi
+
+  need "$binary"
+}
+
 need git
 need perl
+
+install_runtime_tool restic restic
+install_runtime_tool zstd zstd
 
 if ! go_is_new_enough; then
   install_go

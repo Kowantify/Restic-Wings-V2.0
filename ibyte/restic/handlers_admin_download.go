@@ -15,6 +15,7 @@ import (
 )
 
 var subsetRE = regexp.MustCompile(`^[0-9]+/[0-9]+$`)
+const largeDownloadThresholdBytes int64 = 10 * 1024 * 1024 * 1024
 
 type statsResponse struct {
     TotalSize             int64  `json:"total_size"`
@@ -57,7 +58,7 @@ func prepareDownload(c *gin.Context) {
     go func() {
         base, _ := cleanUnder(tempRoot(), filepath.Join(tempRoot(), sid+"-"+snapshotID))
         restoreDir := filepath.Join(base, "restore")
-        archivePath := filepath.Join(base, "backup.tar.gz")
+        archivePath := filepath.Join(base, "backup.tar.zst")
         _ = os.RemoveAll(base)
         _ = os.MkdirAll(restoreDir, 0o700)
         ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
@@ -68,7 +69,42 @@ func prepareDownload(c *gin.Context) {
             if sourceErr != nil {
                 err = sourceErr
             } else {
-                err = writeTarGzWithRoot(archiveSource, archivePath, sid)
+                restoredBytes, sizeErr := directorySize(archiveSource)
+                if sizeErr != nil {
+                    err = sizeErr
+                } else if restoredBytes > largeDownloadThresholdBytes {
+                    shortID := snapshotID
+                    if len(shortID) > 12 {
+                        shortID = shortID[:12]
+                    }
+                    fileName := "restic-backup-" + shortID + ".tar.zst"
+                    sftpPath, pathErr := cleanUnder(volume, filepath.Join(volume, fileName))
+                    if pathErr != nil {
+                        err = pathErr
+                    } else {
+                        err = writeTarZstWithRoot(archiveSource, sftpPath, sid)
+                        if err == nil {
+                            finished := time.Now().UTC()
+                            setJob(key, jobState{
+                                Status:     "sftp_ready",
+                                Message:    "backup archive was placed in the server files for SFTP download",
+                                StartedAt:  &started,
+                                FinishedAt: &finished,
+                                Result: map[string]any{
+                                    "file_name":      fileName,
+                                    "sftp_path":      "/" + fileName,
+                                    "size_bytes":     restoredBytes,
+                                    "archive_format": "tar.zst",
+                                    "large_download": true,
+                                },
+                            })
+                            _ = os.RemoveAll(restoreDir)
+                            return
+                        }
+                    }
+                } else {
+                    err = writeTarZstWithRoot(archiveSource, archivePath, sid)
+                }
             }
         }
         _ = os.RemoveAll(restoreDir)
@@ -81,7 +117,7 @@ func prepareDownload(c *gin.Context) {
             setJob(key, jobState{Status: "failed", Message: msg, StartedAt: &started, FinishedAt: &finished})
             return
         }
-        setJob(key, jobState{Status: "ready", Message: "archive ready", StartedAt: &started, FinishedAt: &finished, Result: map[string]any{"path": archivePath}})
+        setJob(key, jobState{Status: "ready", Message: "archive ready", StartedAt: &started, FinishedAt: &finished, Result: map[string]any{"path": archivePath, "archive_format": "tar.zst"}})
     }()
     c.JSON(http.StatusAccepted, gin.H{"message": "prepare started", "status": "running"})
 }
@@ -130,8 +166,8 @@ func streamDownload(c *gin.Context) {
         errorJSON(c, http.StatusNotFound, "prepared archive was not found")
         return
     }
-    c.Header("Content-Type", "application/gzip")
-    c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"restic-%s-%s.tar.gz\"", serverID(c), snapshotID))
+    c.Header("Content-Type", "application/zstd")
+    c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"restic-%s-%s.tar.zst\"", serverID(c), snapshotID))
     c.File(archivePath)
     go func() {
         time.Sleep(30 * time.Second)
