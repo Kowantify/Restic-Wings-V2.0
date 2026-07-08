@@ -12,6 +12,9 @@ ADDON_PATH="${ADDON_PATH:-wings-addon}"
 WINGS_VERSION="${WINGS_VERSION:-v1.13.1}"
 GO_VERSION_REQUIRED="${GO_VERSION_REQUIRED:-1.24.0}"
 OUT_BIN="$OUT_DIR/wings-restic-$WINGS_VERSION"
+INSTALL_WINGS="${INSTALL_WINGS:-1}"
+WINGS_BIN="${WINGS_BIN:-/usr/local/bin/wings}"
+WINGS_SERVICE="${WINGS_SERVICE:-wings}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -142,3 +145,45 @@ fi
 chmod +x "$OUT_BIN"
 echo "Created:"
 ls -lah "$OUT_BIN"
+
+if [ "$INSTALL_WINGS" = "0" ] || [ "$INSTALL_WINGS" = "false" ]; then
+  echo "Skipping install because INSTALL_WINGS=$INSTALL_WINGS"
+  exit 0
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Built successfully, but installing to $WINGS_BIN requires root." >&2
+  echo "Rerun with sudo, or use INSTALL_WINGS=0 to build only." >&2
+  exit 1
+fi
+
+if ! command -v systemctl >/dev/null 2>&1; then
+  echo "Built successfully, but systemctl was not found. Install manually:" >&2
+  echo "  cp $OUT_BIN $WINGS_BIN" >&2
+  echo "  chmod +x $WINGS_BIN" >&2
+  exit 1
+fi
+
+backup_path=""
+if [ -f "$WINGS_BIN" ]; then
+  backup_path="$WINGS_BIN.backup.$(date +%Y%m%d-%H%M%S)"
+  echo "Backing up current Wings binary to $backup_path"
+  cp "$WINGS_BIN" "$backup_path"
+fi
+
+echo "Stopping $WINGS_SERVICE"
+systemctl stop "$WINGS_SERVICE" || true
+
+echo "Installing custom Wings binary to $WINGS_BIN"
+install -m 0755 "$OUT_BIN" "$WINGS_BIN"
+
+echo "Starting $WINGS_SERVICE"
+systemctl start "$WINGS_SERVICE"
+
+echo "Wings service status:"
+systemctl status "$WINGS_SERVICE" --no-pager || true
+
+echo "Production install complete."
+if [ -n "$backup_path" ]; then
+  echo "Previous binary backup: $backup_path"
+fi

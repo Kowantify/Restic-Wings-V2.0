@@ -92,7 +92,18 @@ func prepareStatus(c *gin.Context) {
         errorJSON(c, http.StatusUnprocessableEntity, err.Error())
         return
     }
-    c.JSON(http.StatusOK, getJob(jobKey(serverID(c), "prepare:"+snapshotID)))
+    state := getJob(jobKey(serverID(c), "prepare:"+snapshotID))
+    if state.Result != nil {
+        redacted := make(map[string]any, len(state.Result))
+        for key, value := range state.Result {
+            if key == "path" {
+                continue
+            }
+            redacted[key] = value
+        }
+        state.Result = redacted
+    }
+    c.JSON(http.StatusOK, state)
 }
 
 func streamDownload(c *gin.Context) {
@@ -262,7 +273,7 @@ func repoSize(c *gin.Context) {
         }
         return nil
     })
-    c.JSON(http.StatusOK, gin.H{"exists": size > 0, "total_bytes": size, "repos": []gin.H{{"name": filepath.Base(repo), "path": repo, "size_bytes": size}}})
+    c.JSON(http.StatusOK, gin.H{"exists": size > 0, "total_bytes": size, "repos": []gin.H{{"name": filepath.Base(repo), "size_bytes": size}}})
 }
 
 func deleteRepo(c *gin.Context) {

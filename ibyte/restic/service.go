@@ -130,12 +130,12 @@ func cleanUnder(root, child string) (string, error) {
 func repoPath(serverID, owner string) (string, error) {
     root := repoRoot()
     preferred := filepath.Join(root, repoName(serverID, owner))
-    legacy := filepath.Join(root, serverID)
+    serverOnly := filepath.Join(root, serverID)
     if _, err := os.Stat(preferred); err == nil {
         return cleanUnder(root, preferred)
     }
-    if _, err := os.Stat(legacy); err == nil {
-        return cleanUnder(root, legacy)
+    if _, err := os.Stat(serverOnly); err == nil {
+        return cleanUnder(root, serverOnly)
     }
     return cleanUnder(root, preferred)
 }
@@ -150,8 +150,15 @@ func tempRoot() string {
 }
 
 func runRestic(ctx context.Context, repo, key string, args ...string) ([]byte, []byte, error) {
+    return runResticInDir(ctx, "", repo, key, args...)
+}
+
+func runResticInDir(ctx context.Context, dir, repo, key string, args ...string) ([]byte, []byte, error) {
     fullArgs := append([]string{"-r", repo}, args...)
     cmd := exec.CommandContext(ctx, "restic", fullArgs...)
+    if dir != "" {
+        cmd.Dir = dir
+    }
     env := os.Environ()
     env = append(env, "RESTIC_PASSWORD="+key)
     cmd.Env = env
@@ -235,7 +242,7 @@ func enforceBackupLimit(ctx context.Context, repo, key string, max int) error {
         }
         _, stderr, err := runRestic(ctx, repo, key, "forget", id, "--prune")
         if err != nil {
-            return fmt.Errorf("failed pruning old snapshot: %s", string(stderr))
+            return fmt.Errorf("failed enforcing backup retention: %s", string(stderr))
         }
         snaps, err = listSnapshots(ctx, repo, key)
         if err != nil {
