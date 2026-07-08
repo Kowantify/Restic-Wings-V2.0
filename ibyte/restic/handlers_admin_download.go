@@ -68,8 +68,22 @@ func prepareDownload(c *gin.Context) {
         sizeSource := "unknown"
         _ = os.RemoveAll(base)
         _ = os.MkdirAll(restoreDir, 0o700)
-        ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
-        defer cancel()
+    ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
+    defer cancel()
+
+        snaps, err := listSnapshots(ctx, repo, req.EncryptionKey)
+        if err != nil {
+            finished := time.Now().UTC()
+            setJob(key, jobState{Status: "failed", Message: err.Error(), StartedAt: &started, FinishedAt: &finished})
+            _ = os.RemoveAll(base)
+            return
+        }
+        if _, err := findSnapshotForServer(snaps, snapshotID, sid, volume); err != nil {
+            finished := time.Now().UTC()
+            setJob(key, jobState{Status: "failed", Message: err.Error(), StartedAt: &started, FinishedAt: &finished})
+            _ = os.RemoveAll(base)
+            return
+        }
 
         statsCtx, statsCancel := context.WithTimeout(context.Background(), snapshotStatsTimeout)
         if snapshotBytes, statsErr := snapshotRestoreSize(statsCtx, repo, req.EncryptionKey, snapshotID); statsErr == nil {

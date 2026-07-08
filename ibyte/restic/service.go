@@ -254,6 +254,59 @@ func listSnapshots(ctx context.Context, repo, key string) ([]snapshot, error) {
     return snaps, nil
 }
 
+func snapshotBelongsToServer(snap snapshot, serverID, volume string) bool {
+    taggedForServer := hasTag(snap.Tags, serverID)
+    if len(snap.Paths) == 0 {
+        return taggedForServer
+    }
+
+    hasAbsolute := false
+    hasRelative := false
+    for _, path := range snap.Paths {
+        if filepath.IsAbs(path) {
+            hasAbsolute = true
+            if !isUnderOrEqual(volume, path) {
+                return false
+            }
+        } else {
+            hasRelative = true
+        }
+    }
+
+    if hasAbsolute && hasRelative {
+        return false
+    }
+
+    if hasRelative {
+        return taggedForServer
+    }
+
+    return taggedForServer || hasAbsolute
+}
+
+func filterSnapshotsForServer(snaps []snapshot, serverID, volume string) []snapshot {
+    filtered := make([]snapshot, 0, len(snaps))
+    for _, snap := range snaps {
+        if snapshotBelongsToServer(snap, serverID, volume) {
+            filtered = append(filtered, snap)
+        }
+    }
+    return filtered
+}
+
+func findSnapshotForServer(snaps []snapshot, snapshotID, serverID, volume string) (*snapshot, error) {
+    for i := range snaps {
+        if snaps[i].ID != snapshotID && snaps[i].ShortID != snapshotID {
+            continue
+        }
+        if !snapshotBelongsToServer(snaps[i], serverID, volume) {
+            return nil, errors.New("snapshot does not belong to this server")
+        }
+        return &snaps[i], nil
+    }
+    return nil, errors.New("snapshot was not found")
+}
+
 func hasTag(tags []string, tag string) bool {
     for _, t := range tags {
         if t == tag {

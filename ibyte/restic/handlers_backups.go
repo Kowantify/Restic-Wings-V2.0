@@ -88,7 +88,13 @@ func listBackups(c *gin.Context) {
         errorJSON(c, http.StatusUnprocessableEntity, err.Error())
         return
     }
-    repo, err := repoPath(serverID(c), req.OwnerUsername)
+    sid := serverID(c)
+    repo, err := repoPath(sid, req.OwnerUsername)
+    if err != nil {
+        errorJSON(c, http.StatusBadRequest, err.Error())
+        return
+    }
+    volume, err := volumePath(sid)
     if err != nil {
         errorJSON(c, http.StatusBadRequest, err.Error())
         return
@@ -100,6 +106,7 @@ func listBackups(c *gin.Context) {
 		errorJSON(c, http.StatusBadGateway, err.Error())
 		return
 	}
+    snaps = filterSnapshotsForServer(snaps, sid, volume)
 	total := len(snaps)
 	filtered := filterSnapshots(snaps, req)
 	limit := req.Limit
@@ -189,7 +196,7 @@ func restoreBackup(c *gin.Context) {
             setJob(key, jobState{Status: "failed", Message: err.Error(), StartedAt: &started, FinishedAt: &finished})
             return
         }
-        restoreArgs, err := restoreArgsForSnapshot(ctx, repo, req.EncryptionKey, snapshotID, volume)
+        restoreArgs, err := restoreArgsForSnapshot(ctx, repo, req.EncryptionKey, snapshotID, sid, volume)
         if err != nil {
             finished := time.Now().UTC()
             setJob(key, jobState{Status: "failed", Message: err.Error(), StartedAt: &started, FinishedAt: &finished})
@@ -210,21 +217,14 @@ func restoreStatus(c *gin.Context) {
     c.JSON(http.StatusOK, getJob(jobKey(serverID(c), "restore")))
 }
 
-func restoreArgsForSnapshot(ctx context.Context, repo, key, snapshotID, volume string) ([]string, error) {
+func restoreArgsForSnapshot(ctx context.Context, repo, key, snapshotID, serverID, volume string) ([]string, error) {
     snaps, err := listSnapshots(ctx, repo, key)
     if err != nil {
         return nil, err
     }
-
-    var selected *snapshot
-    for i := range snaps {
-        if snaps[i].ID == snapshotID || snaps[i].ShortID == snapshotID {
-            selected = &snaps[i]
-            break
-        }
-    }
-    if selected == nil {
-        return nil, fmt.Errorf("snapshot was not found")
+    selected, err := findSnapshotForServer(snaps, snapshotID, serverID, volume)
+    if err != nil {
+        return nil, err
     }
 
     hasAbsolute := false
@@ -261,7 +261,13 @@ func deleteBackup(c *gin.Context) {
         errorJSON(c, http.StatusUnprocessableEntity, err.Error())
         return
     }
-    repo, err := repoPath(serverID(c), req.OwnerUsername)
+    sid := serverID(c)
+    repo, err := repoPath(sid, req.OwnerUsername)
+    if err != nil {
+        errorJSON(c, http.StatusBadRequest, err.Error())
+        return
+    }
+    volume, err := volumePath(sid)
     if err != nil {
         errorJSON(c, http.StatusBadRequest, err.Error())
         return
@@ -273,11 +279,14 @@ func deleteBackup(c *gin.Context) {
         errorJSON(c, http.StatusBadGateway, err.Error())
         return
     }
-    for _, snap := range snaps {
-        if (snap.ID == snapshotID || snap.ShortID == snapshotID) && snap.Locked {
-            errorJSON(c, http.StatusConflict, "snapshot is locked")
-            return
-        }
+    selected, err := findSnapshotForServer(snaps, snapshotID, sid, volume)
+    if err != nil {
+        errorJSON(c, http.StatusNotFound, err.Error())
+        return
+    }
+    if selected.Locked {
+        errorJSON(c, http.StatusConflict, "snapshot is locked")
+        return
     }
     _, stderr, err := runRestic(ctx, repo, req.EncryptionKey, "forget", snapshotID, "--prune")
     if err != nil {
@@ -306,13 +315,28 @@ func tagSnapshot(c *gin.Context, locked bool) {
 		errorJSON(c, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	repo, err := repoPath(serverID(c), req.OwnerUsername)
+	sid := serverID(c)
+	repo, err := repoPath(sid, req.OwnerUsername)
+	if err != nil {
+		errorJSON(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	volume, err := volumePath(sid)
 	if err != nil {
 		errorJSON(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
+	snaps, err := listSnapshots(ctx, repo, req.EncryptionKey)
+	if err != nil {
+		errorJSON(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	if _, err := findSnapshotForServer(snaps, snapshotID, sid, volume); err != nil {
+		errorJSON(c, http.StatusNotFound, err.Error())
+		return
+	}
 	action := "--add"
 	message := "snapshot locked"
 	if !locked {
