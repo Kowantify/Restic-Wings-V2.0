@@ -56,6 +56,7 @@ func prepareDownload(c *gin.Context) {
     key := jobKey(sid, "prepare:"+snapshotID)
     setJob(key, jobState{Status: "running", StartedAt: &started})
     go func() {
+        cleanupOldTempDirs(24 * time.Hour)
         base, _ := cleanUnder(tempRoot(), filepath.Join(tempRoot(), sid+"-"+snapshotID))
         restoreDir := filepath.Join(base, "restore")
         archivePath := filepath.Join(base, "backup.tar.zst")
@@ -98,7 +99,7 @@ func prepareDownload(c *gin.Context) {
                                     "large_download": true,
                                 },
                             })
-                            _ = os.RemoveAll(restoreDir)
+                            _ = os.RemoveAll(base)
                             return
                         }
                     }
@@ -110,6 +111,7 @@ func prepareDownload(c *gin.Context) {
         _ = os.RemoveAll(restoreDir)
         finished := time.Now().UTC()
         if err != nil {
+            _ = os.RemoveAll(base)
             msg := err.Error()
             if len(stderr) > 0 {
                 msg = string(stderr)
@@ -118,6 +120,10 @@ func prepareDownload(c *gin.Context) {
             return
         }
         setJob(key, jobState{Status: "ready", Message: "archive ready", StartedAt: &started, FinishedAt: &finished, Result: map[string]any{"path": archivePath, "archive_format": "tar.zst"}})
+        go func(path string) {
+            time.Sleep(24 * time.Hour)
+            _ = os.RemoveAll(filepath.Dir(path))
+        }(archivePath)
     }()
     c.JSON(http.StatusAccepted, gin.H{"message": "prepare started", "status": "running"})
 }
