@@ -43,7 +43,7 @@ func createBackup(c *gin.Context) {
         if err := ensureRepo(ctx, repo, req.EncryptionKey); err != nil {
             return nil, err
         }
-        stdout, stderr, err := runResticInDir(ctx, volume, repo, req.EncryptionKey, "backup", ".", "--json", "--tag", "pterodactyl", "--tag", sid)
+        stdout, stderr, err := runRestic(ctx, repo, req.EncryptionKey, "backup", volume, "--json", "--tag", "pterodactyl", "--tag", sid)
         if err != nil {
             return nil, fmt.Errorf("restic backup failed: %s", string(stderr))
         }
@@ -189,13 +189,13 @@ func restoreBackup(c *gin.Context) {
             setJob(key, jobState{Status: "failed", Message: err.Error(), StartedAt: &started, FinishedAt: &finished})
             return
         }
-        restoreTarget, err := restoreTargetForSnapshot(ctx, repo, req.EncryptionKey, snapshotID, volume)
+        restoreArgs, err := restoreArgsForSnapshot(ctx, repo, req.EncryptionKey, snapshotID, volume)
         if err != nil {
             finished := time.Now().UTC()
             setJob(key, jobState{Status: "failed", Message: err.Error(), StartedAt: &started, FinishedAt: &finished})
             return
         }
-        _, stderr, err := runRestic(ctx, repo, req.EncryptionKey, "restore", snapshotID, "--target", restoreTarget)
+        _, stderr, err := runRestic(ctx, repo, req.EncryptionKey, restoreArgs...)
         finished := time.Now().UTC()
         if err != nil {
             setJob(key, jobState{Status: "failed", Message: string(stderr), StartedAt: &started, FinishedAt: &finished})
@@ -210,10 +210,10 @@ func restoreStatus(c *gin.Context) {
     c.JSON(http.StatusOK, getJob(jobKey(serverID(c), "restore")))
 }
 
-func restoreTargetForSnapshot(ctx context.Context, repo, key, snapshotID, volume string) (string, error) {
+func restoreArgsForSnapshot(ctx context.Context, repo, key, snapshotID, volume string) ([]string, error) {
     snaps, err := listSnapshots(ctx, repo, key)
     if err != nil {
-        return "", err
+        return nil, err
     }
 
     var selected *snapshot
@@ -224,7 +224,7 @@ func restoreTargetForSnapshot(ctx context.Context, repo, key, snapshotID, volume
         }
     }
     if selected == nil {
-        return "", fmt.Errorf("snapshot was not found")
+        return nil, fmt.Errorf("snapshot was not found")
     }
 
     hasAbsolute := false
@@ -233,7 +233,7 @@ func restoreTargetForSnapshot(ctx context.Context, repo, key, snapshotID, volume
         if filepath.IsAbs(path) {
             hasAbsolute = true
             if !isUnderOrEqual(volume, path) {
-                return "", fmt.Errorf("snapshot contains a path outside this server volume")
+                return nil, fmt.Errorf("snapshot contains a path outside this server volume")
             }
         } else {
             hasRelative = true
@@ -241,12 +241,13 @@ func restoreTargetForSnapshot(ctx context.Context, repo, key, snapshotID, volume
     }
 
     if hasAbsolute && hasRelative {
-        return "", fmt.Errorf("snapshot mixes absolute and relative paths")
+        return nil, fmt.Errorf("snapshot mixes absolute and relative paths")
     }
-    if hasAbsolute {
-        return string(filepath.Separator), nil
+    if hasRelative {
+        return []string{"restore", snapshotID, "--target", volume}, nil
     }
-    return volume, nil
+
+    return []string{"restore", snapshotID, "--target", string(filepath.Separator), "--path", volume}, nil
 }
 
 func deleteBackup(c *gin.Context) {
