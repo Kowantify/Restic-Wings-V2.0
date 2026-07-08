@@ -64,9 +64,10 @@ func prepareDownload(c *gin.Context) {
         cleanupOldTempDirs(24 * time.Hour)
         cleanupOldSFTPArchives(volume, largeDownloadRetention)
         cleanupSFTPArchives(volume)
+        archiveFormat := normalizeArchiveFormat(req.ArchiveFormat)
         base, _ := cleanUnder(tempRoot(), filepath.Join(tempRoot(), sid+"-"+snapshotID))
         restoreDir := filepath.Join(base, "restore")
-        tempArchivePath := filepath.Join(base, "backup.zip")
+        tempArchivePath := filepath.Join(base, "backup"+archiveExtension(archiveFormat))
         archivePath := tempArchivePath
         archiveFileName := ""
         largeDownload := req.ForceSFTP || strings.EqualFold(req.Delivery, "sftp")
@@ -74,8 +75,13 @@ func prepareDownload(c *gin.Context) {
         sizeSource := "unknown"
         if largeDownload {
             var pathErr error
-            archiveFileName = sftpArchiveFileName(snapshotID)
-            archivePath, pathErr = cleanUnder(volume, filepath.Join(volume, archiveFileName))
+            archiveFileName = sftpArchiveFileName(snapshotID, archiveFormat)
+            exportDir, dirErr := exportDirPath(volume)
+            if dirErr != nil {
+                pathErr = dirErr
+            } else {
+                archivePath, pathErr = cleanUnder(volume, filepath.Join(exportDir, archiveFileName))
+            }
             if pathErr != nil {
                 finished := time.Now().UTC()
                 setJob(key, jobState{Status: "failed", Message: pathErr.Error(), StartedAt: &started, FinishedAt: &finished})
@@ -109,8 +115,13 @@ func prepareDownload(c *gin.Context) {
             if estimatedBytes > largeDownloadThresholdBytes && !largeDownload {
                 var pathErr error
                 largeDownload = true
-                archiveFileName = sftpArchiveFileName(snapshotID)
-                archivePath, pathErr = cleanUnder(volume, filepath.Join(volume, archiveFileName))
+                archiveFileName = sftpArchiveFileName(snapshotID, archiveFormat)
+                exportDir, dirErr := exportDirPath(volume)
+                if dirErr != nil {
+                    pathErr = dirErr
+                } else {
+                    archivePath, pathErr = cleanUnder(volume, filepath.Join(exportDir, archiveFileName))
+                }
                 if pathErr != nil {
                     finished := time.Now().UTC()
                     setJob(key, jobState{Status: "failed", Message: pathErr.Error(), StartedAt: &started, FinishedAt: &finished})
@@ -138,8 +149,13 @@ func prepareDownload(c *gin.Context) {
                         if restoredBytes > largeDownloadThresholdBytes && !largeDownload {
                             var pathErr error
                             largeDownload = true
-                            archiveFileName = sftpArchiveFileName(snapshotID)
-                            archivePath, pathErr = cleanUnder(volume, filepath.Join(volume, archiveFileName))
+                            archiveFileName = sftpArchiveFileName(snapshotID, archiveFormat)
+                            exportDir, dirErr := exportDirPath(volume)
+                            if dirErr != nil {
+                                pathErr = dirErr
+                            } else {
+                                archivePath, pathErr = cleanUnder(volume, filepath.Join(exportDir, archiveFileName))
+                            }
                             if pathErr != nil {
                                 err = pathErr
                             }
@@ -147,7 +163,11 @@ func prepareDownload(c *gin.Context) {
                     }
                 }
                 if err == nil {
-                    err = writeZipStoreWithRoot(archiveSource, archivePath, sid)
+                    if archiveFormat == "tar.zst" {
+                        err = writeTarZstWithRoot(archiveSource, archivePath, sid)
+                    } else {
+                        err = writeZipFastWithRoot(archiveSource, archivePath, sid)
+                    }
                 }
             }
         }
@@ -176,10 +196,10 @@ func prepareDownload(c *gin.Context) {
                 FinishedAt: &finished,
                 Result: map[string]any{
                     "file_name":      archiveFileName,
-                    "sftp_path":      "/" + archiveFileName,
+                    "sftp_path":      "/" + exportDirName + "/" + archiveFileName,
                     "size_bytes":     estimatedBytes,
                     "size_source":    sizeSource,
-                    "archive_format": "zip",
+                    "archive_format": archiveFormat,
                     "large_download": true,
                     "delivery":       "sftp",
                     "expires_at":     expiresAt.Format(time.RFC3339),
@@ -194,7 +214,7 @@ func prepareDownload(c *gin.Context) {
             }(archivePath)
             return
         }
-        setJob(key, jobState{Status: "ready", Message: "archive ready", StartedAt: &started, FinishedAt: &finished, Result: map[string]any{"path": archivePath, "size_bytes": estimatedBytes, "size_source": sizeSource, "archive_format": "zip", "delivery": "stream"}})
+        setJob(key, jobState{Status: "ready", Message: "archive ready", StartedAt: &started, FinishedAt: &finished, Result: map[string]any{"path": archivePath, "size_bytes": estimatedBytes, "size_source": sizeSource, "archive_format": archiveFormat, "delivery": "stream"}})
         go func(path string) {
             time.Sleep(24 * time.Hour)
             _ = os.RemoveAll(filepath.Dir(path))
@@ -247,8 +267,10 @@ func streamDownload(c *gin.Context) {
         errorJSON(c, http.StatusNotFound, "prepared archive was not found")
         return
     }
-    c.Header("Content-Type", "application/zip")
-    c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"restic-%s-%s.zip\"", serverID(c), snapshotID))
+    archiveFormat, _ := state.Result["archive_format"].(string)
+    archiveFormat = normalizeArchiveFormat(archiveFormat)
+    c.Header("Content-Type", archiveContentType(archiveFormat))
+    c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"restic-%s-%s%s\"", serverID(c), snapshotID, archiveExtension(archiveFormat)))
     c.File(archivePath)
     go func() {
         time.Sleep(30 * time.Second)
@@ -311,12 +333,12 @@ func snapshotRestoreSize(ctx context.Context, repo, key, snapshotID string) (int
     return parsed.TotalSize, nil
 }
 
-func sftpArchiveFileName(snapshotID string) string {
+func sftpArchiveFileName(snapshotID, archiveFormat string) string {
     shortID := snapshotID
     if len(shortID) > 12 {
         shortID = shortID[:12]
     }
-    return "restic-backup-" + shortID + ".zip"
+    return "restic-backup-" + shortID + archiveExtension(archiveFormat)
 }
 
 func checkRepo(c *gin.Context) {

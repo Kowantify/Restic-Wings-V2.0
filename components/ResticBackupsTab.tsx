@@ -468,11 +468,12 @@ const ResticBackupsTab: React.FC = () => {
     setActiveUntil(untilInput);
   };
 
-  const handleDownloadBackup = async (backup: any, forceSftp: boolean) => {
+  const handleDownloadBackup = async (backup: any, forceSftp: boolean, archiveFormat: 'zip' | 'tar.zst') => {
     setOpenActionMenu(null);
     if (!uuid) return;
 
-    setProgress(forceSftp ? 'Preparing SFTP download...' : 'Preparing download...');
+    const formatLabel = archiveFormat === 'tar.zst' ? 'TAR.ZST' : 'ZIP';
+    setProgress(forceSftp ? `Preparing SFTP ${formatLabel} download...` : `Preparing ${formatLabel} download...`);
     setError(null);
     setSuccess(null);
 
@@ -484,9 +485,12 @@ const ResticBackupsTab: React.FC = () => {
         return;
       }
 
+      const archiveDescription = archiveFormat === 'tar.zst'
+        ? 'TAR.ZST is much smaller but requires zstd, 7-Zip, NanaZip, or another compatible extractor.'
+        : 'ZIP is the most compatible option and uses fast compression.';
       setDownloadNotice(forceSftp
-        ? 'Preparing a temporary .zip file in this server\'s files for SFTP download.'
-        : 'Backups over 5GB are automatically prepared for SFTP download. Smaller backups can stream through the panel.'
+        ? `Preparing a temporary ${archiveFormat === 'tar.zst' ? '.tar.zst' : '.zip'} file in this server's files for SFTP download. ${archiveDescription}`
+        : `Backups over 5GB are automatically prepared for SFTP download. ${archiveDescription}`
       );
 
       const delivery = forceSftp ? 'sftp' : 'stream';
@@ -502,7 +506,7 @@ const ResticBackupsTab: React.FC = () => {
           ...csrfHeaders(),
         },
         credentials: 'same-origin',
-        body: JSON.stringify({ delivery, force_sftp: forceSftp }),
+        body: JSON.stringify({ delivery, force_sftp: forceSftp, archive_format: archiveFormat }),
       });
 
       if (!prepRes.ok) {
@@ -543,7 +547,7 @@ const ResticBackupsTab: React.FC = () => {
                 : 'about 24 hours after it was created';
               setDownloadNotice(
                 <div css={tw`space-y-1`}>
-                  <div>This backup was packaged as a temporary .zip file in this server&apos;s files for SFTP download.</div>
+                  <div>This backup was packaged as a temporary {status?.result?.archive_format === 'tar.zst' ? '.tar.zst' : '.zip'} file in this server&apos;s files for SFTP download.</div>
                   <div>File: <code css={tw`text-neutral-200`}>{sftpPath}</code></div>
                   {sftpUser && sftpHost ? (
                     <div>Login: <code css={tw`text-neutral-200`}>{sftpUser}@{sftpHost}:{sftpPort || 2022}</code></div>
@@ -576,7 +580,7 @@ const ResticBackupsTab: React.FC = () => {
           return;
         }
         const elapsed = Math.floor((Date.now() - startTime) / 1000);
-        setProgress(`${forceSftp ? 'Preparing SFTP download' : 'Preparing download'}... (${elapsed}s elapsed)`);
+        setProgress(`${forceSftp ? `Preparing SFTP ${formatLabel} download` : `Preparing ${formatLabel} download`}... (${elapsed}s elapsed)`);
         const delay = Math.min(2000 + pollCount * 500, 10000);
         setTimeout(poll, delay);
       };
@@ -1040,22 +1044,44 @@ const ResticBackupsTab: React.FC = () => {
                         className="restic-action-menu-row"
                         type="button"
                         role="menuitem"
-                        onClick={() => handleDownloadBackup(b, false)}
+                        onClick={() => handleDownloadBackup(b, false, 'zip')}
                       >
                         <FontAwesomeIcon icon={faCloudDownloadAlt} />
                         <span className="BackupContextMenu___StyledSpan-sc-1p494ba-6" css={tw`ml-2`}>
-                          Download
+                          Download ZIP
                         </span>
                       </button>
                       <button
                         className="restic-action-menu-row"
                         type="button"
                         role="menuitem"
-                        onClick={() => handleDownloadBackup(b, true)}
+                        onClick={() => handleDownloadBackup(b, false, 'tar.zst')}
                       >
                         <FontAwesomeIcon icon={faCloudDownloadAlt} />
                         <span className="BackupContextMenu___StyledSpan-sc-1p494ba-6" css={tw`ml-2`}>
-                          Prepare SFTP
+                          Download ZST
+                        </span>
+                      </button>
+                      <button
+                        className="restic-action-menu-row"
+                        type="button"
+                        role="menuitem"
+                        onClick={() => handleDownloadBackup(b, true, 'zip')}
+                      >
+                        <FontAwesomeIcon icon={faCloudDownloadAlt} />
+                        <span className="BackupContextMenu___StyledSpan-sc-1p494ba-6" css={tw`ml-2`}>
+                          SFTP ZIP
+                        </span>
+                      </button>
+                      <button
+                        className="restic-action-menu-row"
+                        type="button"
+                        role="menuitem"
+                        onClick={() => handleDownloadBackup(b, true, 'tar.zst')}
+                      >
+                        <FontAwesomeIcon icon={faCloudDownloadAlt} />
+                        <span className="BackupContextMenu___StyledSpan-sc-1p494ba-6" css={tw`ml-2`}>
+                          SFTP ZST
                         </span>
                       </button>
                       <button

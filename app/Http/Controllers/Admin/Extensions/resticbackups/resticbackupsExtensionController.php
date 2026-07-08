@@ -1310,6 +1310,9 @@ class resticbackupsExtensionController extends Controller
         $encryptionKey = $ctx['encryptionKey'];
         $ownerUsername = $ctx['ownerUsername'];
         $delivery = $request->input('delivery') === 'sftp' ? 'sftp' : 'stream';
+        $archiveFormat = in_array($request->input('archive_format'), ['zip', 'tar.zst'], true)
+            ? $request->input('archive_format')
+            : 'zip';
 
         // Prepare the archive on Wings (server-to-server only)
         try {
@@ -1327,6 +1330,7 @@ class resticbackupsExtensionController extends Controller
                     'encryption_key' => $encryptionKey,
                     'delivery' => $delivery,
                     'force_sftp' => $delivery === 'sftp',
+                    'archive_format' => $archiveFormat,
                 ],
             ]);
             if (!$response || $response->getStatusCode() >= 300) {
@@ -1520,6 +1524,9 @@ class resticbackupsExtensionController extends Controller
         $encryptionKey = $ctx['encryptionKey'];
         $ownerUsername = $ctx['ownerUsername'];
         $delivery = $request->input('delivery') === 'sftp' ? 'sftp' : 'stream';
+        $archiveFormat = in_array($request->input('archive_format'), ['zip', 'tar.zst'], true)
+            ? $request->input('archive_format')
+            : 'zip';
 
         try {
             $client = new \GuzzleHttp\Client();
@@ -1536,6 +1543,7 @@ class resticbackupsExtensionController extends Controller
                     'encryption_key' => $encryptionKey,
                     'delivery' => $delivery,
                     'force_sftp' => $delivery === 'sftp',
+                    'archive_format' => $archiveFormat,
                 ],
             ]);
 

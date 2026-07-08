@@ -3,6 +3,7 @@ package restic
 import (
 	"archive/tar"
 	"archive/zip"
+	"compress/flate"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -36,12 +37,15 @@ type resticRequest struct {
 	MaxRepoBytes  int64  `json:"max_repo_bytes" form:"max_repo_bytes"`
 	Delivery      string `json:"delivery" form:"delivery"`
 	ForceSFTP     bool   `json:"force_sftp" form:"force_sftp"`
+	ArchiveFormat string `json:"archive_format" form:"archive_format"`
 	Limit         int    `json:"limit" form:"limit"`
 	Cursor        string `json:"cursor" form:"cursor"`
 	Since         string `json:"since" form:"since"`
 	Until         string `json:"until" form:"until"`
 	IncludeTotal  string `json:"include_total" form:"include_total"`
 }
+
+const exportDirName = ".restic-downloads"
 
 type pruneRequest struct {
     resticRequest
@@ -200,6 +204,8 @@ func cleanupOldTempDirs(maxAge time.Duration) {
 }
 
 func cleanupOldSFTPArchives(volume string, maxAge time.Duration) {
+    cleanupOldSFTPExportDir(volume, maxAge)
+
     entries, err := os.ReadDir(volume)
     if err != nil {
         return
@@ -226,6 +232,10 @@ func cleanupOldSFTPArchives(volume string, maxAge time.Duration) {
 }
 
 func cleanupSFTPArchives(volume string) {
+    if dir, err := exportDirPath(volume); err == nil {
+        _ = os.RemoveAll(dir)
+    }
+
     entries, err := os.ReadDir(volume)
     if err != nil {
         return
@@ -246,6 +256,24 @@ func cleanupSFTPArchives(volume string) {
     }
 }
 
+func exportDirPath(volume string) (string, error) {
+    return cleanUnder(volume, filepath.Join(volume, exportDirName))
+}
+
+func cleanupOldSFTPExportDir(volume string, maxAge time.Duration) {
+    dir, err := exportDirPath(volume)
+    if err != nil {
+        return
+    }
+    info, err := os.Stat(dir)
+    if err != nil || !info.IsDir() {
+        return
+    }
+    if info.ModTime().Before(time.Now().Add(-maxAge)) {
+        _ = os.RemoveAll(dir)
+    }
+}
+
 func isResticExportArchive(name string) bool {
     if !strings.HasPrefix(name, "restic-backup-") {
         return false
@@ -254,6 +282,29 @@ func isResticExportArchive(name string) bool {
         strings.HasSuffix(name, ".tar.zst") ||
         strings.HasSuffix(name, ".tar.gz") ||
         strings.HasSuffix(name, ".tgz")
+}
+
+func normalizeArchiveFormat(format string) string {
+    switch strings.ToLower(strings.TrimSpace(format)) {
+    case "zst", "tar.zst", "tzst":
+        return "tar.zst"
+    default:
+        return "zip"
+    }
+}
+
+func archiveExtension(format string) string {
+    if normalizeArchiveFormat(format) == "tar.zst" {
+        return ".tar.zst"
+    }
+    return ".zip"
+}
+
+func archiveContentType(format string) string {
+    if normalizeArchiveFormat(format) == "tar.zst" {
+        return "application/zstd"
+    }
+    return "application/zip"
 }
 
 func repoDiskSize(repo string) (int64, error) {
@@ -638,7 +689,7 @@ func writeTarZstWithRoot(source, target, rootName string) error {
     return waitErr
 }
 
-func writeZipStoreWithRoot(source, target, rootName string) error {
+func writeZipFastWithRoot(source, target, rootName string) error {
     rootName = strings.Trim(filepath.ToSlash(rootName), "/")
     if rootName != "" && (!safeID.MatchString(rootName) || strings.Contains(rootName, "..")) {
         return errors.New("invalid archive root name")
@@ -654,6 +705,9 @@ func writeZipStoreWithRoot(source, target, rootName string) error {
 
     zipWriter := zip.NewWriter(file)
     defer zipWriter.Close()
+    zipWriter.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) {
+        return flate.NewWriter(out, flate.BestSpeed)
+    })
 
     return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
         if err != nil {
@@ -685,7 +739,7 @@ func writeZipStoreWithRoot(source, target, rootName string) error {
         if info.IsDir() && !strings.HasSuffix(header.Name, "/") {
             header.Name += "/"
         }
-        header.Method = zip.Store
+        header.Method = zip.Deflate
 
         writer, err := zipWriter.CreateHeader(header)
         if err != nil {
