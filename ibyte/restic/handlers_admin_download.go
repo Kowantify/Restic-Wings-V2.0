@@ -16,6 +16,7 @@ import (
 
 var subsetRE = regexp.MustCompile(`^[0-9]+/[0-9]+$`)
 const largeDownloadThresholdBytes int64 = 10 * 1024 * 1024 * 1024
+const snapshotStatsTimeout = 45 * time.Second
 
 type statsResponse struct {
     TotalSize             int64  `json:"total_size"`
@@ -59,51 +60,62 @@ func prepareDownload(c *gin.Context) {
         cleanupOldTempDirs(24 * time.Hour)
         base, _ := cleanUnder(tempRoot(), filepath.Join(tempRoot(), sid+"-"+snapshotID))
         restoreDir := filepath.Join(base, "restore")
-        archivePath := filepath.Join(base, "backup.tar.zst")
+        tempArchivePath := filepath.Join(base, "backup.tar.zst")
+        archivePath := tempArchivePath
+        archiveFileName := ""
+        largeDownload := false
+        estimatedBytes := int64(0)
+        sizeSource := "unknown"
         _ = os.RemoveAll(base)
         _ = os.MkdirAll(restoreDir, 0o700)
         ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
         defer cancel()
+
+        statsCtx, statsCancel := context.WithTimeout(context.Background(), snapshotStatsTimeout)
+        if snapshotBytes, statsErr := snapshotRestoreSize(statsCtx, repo, req.EncryptionKey, snapshotID); statsErr == nil {
+            estimatedBytes = snapshotBytes
+            sizeSource = "restic_stats"
+            if estimatedBytes > largeDownloadThresholdBytes {
+                var pathErr error
+                largeDownload = true
+                archiveFileName = sftpArchiveFileName(snapshotID)
+                archivePath, pathErr = cleanUnder(volume, filepath.Join(volume, archiveFileName))
+                if pathErr != nil {
+                    finished := time.Now().UTC()
+                    setJob(key, jobState{Status: "failed", Message: pathErr.Error(), StartedAt: &started, FinishedAt: &finished})
+                    statsCancel()
+                    _ = os.RemoveAll(base)
+                    return
+                }
+            }
+        }
+        statsCancel()
+
         _, stderr, err := runRestic(ctx, repo, req.EncryptionKey, "restore", snapshotID, "--target", restoreDir)
         if err == nil {
             archiveSource, sourceErr := restoredVolumeSource(restoreDir, volume, sid)
             if sourceErr != nil {
                 err = sourceErr
             } else {
-                restoredBytes, sizeErr := directorySize(archiveSource)
-                if sizeErr != nil {
-                    err = sizeErr
-                } else if restoredBytes > largeDownloadThresholdBytes {
-                    shortID := snapshotID
-                    if len(shortID) > 12 {
-                        shortID = shortID[:12]
-                    }
-                    fileName := "restic-backup-" + shortID + ".tar.zst"
-                    sftpPath, pathErr := cleanUnder(volume, filepath.Join(volume, fileName))
-                    if pathErr != nil {
-                        err = pathErr
+                if sizeSource == "unknown" {
+                    restoredBytes, sizeErr := directorySize(archiveSource)
+                    if sizeErr != nil {
+                        err = sizeErr
                     } else {
-                        err = writeTarZstWithRoot(archiveSource, sftpPath, sid)
-                        if err == nil {
-                            finished := time.Now().UTC()
-                            setJob(key, jobState{
-                                Status:     "sftp_ready",
-                                Message:    "backup archive was placed in the server files for SFTP download",
-                                StartedAt:  &started,
-                                FinishedAt: &finished,
-                                Result: map[string]any{
-                                    "file_name":      fileName,
-                                    "sftp_path":      "/" + fileName,
-                                    "size_bytes":     restoredBytes,
-                                    "archive_format": "tar.zst",
-                                    "large_download": true,
-                                },
-                            })
-                            _ = os.RemoveAll(base)
-                            return
+                        estimatedBytes = restoredBytes
+                        sizeSource = "restored_directory"
+                        if restoredBytes > largeDownloadThresholdBytes {
+                            var pathErr error
+                            largeDownload = true
+                            archiveFileName = sftpArchiveFileName(snapshotID)
+                            archivePath, pathErr = cleanUnder(volume, filepath.Join(volume, archiveFileName))
+                            if pathErr != nil {
+                                err = pathErr
+                            }
                         }
                     }
-                } else {
+                }
+                if err == nil {
                     err = writeTarZstWithRoot(archiveSource, archivePath, sid)
                 }
             }
@@ -112,6 +124,11 @@ func prepareDownload(c *gin.Context) {
         finished := time.Now().UTC()
         if err != nil {
             _ = os.RemoveAll(base)
+            if largeDownload && archivePath != "" {
+                if safeArchivePath, cleanErr := cleanUnder(volume, archivePath); cleanErr == nil {
+                    _ = os.Remove(safeArchivePath)
+                }
+            }
             msg := err.Error()
             if len(stderr) > 0 {
                 msg = string(stderr)
@@ -119,7 +136,25 @@ func prepareDownload(c *gin.Context) {
             setJob(key, jobState{Status: "failed", Message: msg, StartedAt: &started, FinishedAt: &finished})
             return
         }
-        setJob(key, jobState{Status: "ready", Message: "archive ready", StartedAt: &started, FinishedAt: &finished, Result: map[string]any{"path": archivePath, "archive_format": "tar.zst"}})
+        if largeDownload {
+            setJob(key, jobState{
+                Status:     "sftp_ready",
+                Message:    "backup archive was placed in the server files for SFTP download",
+                StartedAt:  &started,
+                FinishedAt: &finished,
+                Result: map[string]any{
+                    "file_name":      archiveFileName,
+                    "sftp_path":      "/" + archiveFileName,
+                    "size_bytes":     estimatedBytes,
+                    "size_source":    sizeSource,
+                    "archive_format": "tar.zst",
+                    "large_download": true,
+                },
+            })
+            _ = os.RemoveAll(base)
+            return
+        }
+        setJob(key, jobState{Status: "ready", Message: "archive ready", StartedAt: &started, FinishedAt: &finished, Result: map[string]any{"path": archivePath, "size_bytes": estimatedBytes, "size_source": sizeSource, "archive_format": "tar.zst"}})
         go func(path string) {
             time.Sleep(24 * time.Hour)
             _ = os.RemoveAll(filepath.Dir(path))
@@ -222,6 +257,26 @@ func statsMode(ctx context.Context, repo, key, mode string) (resticStats, error)
         return resticStats{}, err
     }
     return parsed, nil
+}
+
+func snapshotRestoreSize(ctx context.Context, repo, key, snapshotID string) (int64, error) {
+    stdout, stderr, err := runRestic(ctx, repo, key, "stats", "--json", "--mode", "restore-size", "--no-lock", snapshotID)
+    if err != nil {
+        return 0, fmt.Errorf("restic snapshot stats failed: %s", string(stderr))
+    }
+    var parsed resticStats
+    if err := json.Unmarshal(stdout, &parsed); err != nil {
+        return 0, err
+    }
+    return parsed.TotalSize, nil
+}
+
+func sftpArchiveFileName(snapshotID string) string {
+    shortID := snapshotID
+    if len(shortID) > 12 {
+        shortID = shortID[:12]
+    }
+    return "restic-backup-" + shortID + ".tar.zst"
 }
 
 func checkRepo(c *gin.Context) {
