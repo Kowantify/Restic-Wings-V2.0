@@ -33,6 +33,8 @@ type resticRequest struct {
 	EncryptionKey string `json:"encryption_key" form:"encryption_key"`
 	MaxBackups    int    `json:"max_backups" form:"max_backups"`
 	MaxRepoBytes  int64  `json:"max_repo_bytes" form:"max_repo_bytes"`
+	Delivery      string `json:"delivery" form:"delivery"`
+	ForceSFTP     bool   `json:"force_sftp" form:"force_sftp"`
 	Limit         int    `json:"limit" form:"limit"`
 	Cursor        string `json:"cursor" form:"cursor"`
 	Since         string `json:"since" form:"since"`

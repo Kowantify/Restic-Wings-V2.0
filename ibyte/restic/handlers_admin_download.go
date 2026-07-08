@@ -15,7 +15,7 @@ import (
 )
 
 var subsetRE = regexp.MustCompile(`^[0-9]+/[0-9]+$`)
-const largeDownloadThresholdBytes int64 = 10 * 1024 * 1024 * 1024
+const largeDownloadThresholdBytes int64 = 5 * 1024 * 1024 * 1024
 const snapshotStatsTimeout = 45 * time.Second
 const largeDownloadRetention = 24 * time.Hour
 
@@ -69,9 +69,20 @@ func prepareDownload(c *gin.Context) {
         tempArchivePath := filepath.Join(base, "backup.tar.zst")
         archivePath := tempArchivePath
         archiveFileName := ""
-        largeDownload := false
+        largeDownload := req.ForceSFTP || strings.EqualFold(req.Delivery, "sftp")
         estimatedBytes := int64(0)
         sizeSource := "unknown"
+        if largeDownload {
+            var pathErr error
+            archiveFileName = sftpArchiveFileName(snapshotID)
+            archivePath, pathErr = cleanUnder(volume, filepath.Join(volume, archiveFileName))
+            if pathErr != nil {
+                finished := time.Now().UTC()
+                setJob(key, jobState{Status: "failed", Message: pathErr.Error(), StartedAt: &started, FinishedAt: &finished})
+                _ = os.RemoveAll(base)
+                return
+            }
+        }
         _ = os.RemoveAll(base)
         _ = os.MkdirAll(restoreDir, 0o700)
     ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
@@ -95,7 +106,7 @@ func prepareDownload(c *gin.Context) {
         if snapshotBytes, statsErr := snapshotRestoreSize(statsCtx, repo, req.EncryptionKey, snapshotID); statsErr == nil {
             estimatedBytes = snapshotBytes
             sizeSource = "restic_stats"
-            if estimatedBytes > largeDownloadThresholdBytes {
+            if estimatedBytes > largeDownloadThresholdBytes && !largeDownload {
                 var pathErr error
                 largeDownload = true
                 archiveFileName = sftpArchiveFileName(snapshotID)
@@ -124,7 +135,7 @@ func prepareDownload(c *gin.Context) {
                     } else {
                         estimatedBytes = restoredBytes
                         sizeSource = "restored_directory"
-                        if restoredBytes > largeDownloadThresholdBytes {
+                        if restoredBytes > largeDownloadThresholdBytes && !largeDownload {
                             var pathErr error
                             largeDownload = true
                             archiveFileName = sftpArchiveFileName(snapshotID)
@@ -170,6 +181,7 @@ func prepareDownload(c *gin.Context) {
                     "size_source":    sizeSource,
                     "archive_format": "tar.zst",
                     "large_download": true,
+                    "delivery":       "sftp",
                     "expires_at":     expiresAt.Format(time.RFC3339),
                 },
             })
@@ -182,7 +194,7 @@ func prepareDownload(c *gin.Context) {
             }(archivePath)
             return
         }
-        setJob(key, jobState{Status: "ready", Message: "archive ready", StartedAt: &started, FinishedAt: &finished, Result: map[string]any{"path": archivePath, "size_bytes": estimatedBytes, "size_source": sizeSource, "archive_format": "tar.zst"}})
+        setJob(key, jobState{Status: "ready", Message: "archive ready", StartedAt: &started, FinishedAt: &finished, Result: map[string]any{"path": archivePath, "size_bytes": estimatedBytes, "size_source": sizeSource, "archive_format": "tar.zst", "delivery": "stream"}})
         go func(path string) {
             time.Sleep(24 * time.Hour)
             _ = os.RemoveAll(filepath.Dir(path))
