@@ -1,3 +1,13 @@
+@php
+  $currentToolTitle = session('admin_tool_title', 'Result');
+  $isInventoryModal = session('admin_tool_output') && in_array($currentToolTitle, ['Node Repo Inventory', 'Live Restic Repos', 'Archived Restic Repos'], true);
+@endphp
+
+@if($isInventoryModal)
+<div class="restic-inventory-modal-root">
+  <div class="restic-inventory-modal-backdrop" onclick="this.closest('.restic-inventory-modal-root').remove();"></div>
+@endif
+
 <div class="row">
   <div class="col-xs-12">
     @if($errors->any())
@@ -27,9 +37,14 @@
         $toolTitle = session('admin_tool_title', 'Result');
         $toolPayload = session('admin_tool_payload');
       @endphp
-      <div class="box box-success">
+      <div class="box box-success {{ $isInventoryModal ? 'restic-inventory-modal-box' : '' }}">
         <div class="box-header with-border">
           <h3 class="box-title">{{ $toolTitle }}</h3>
+          @if($isInventoryModal)
+            <button type="button" class="close restic-inventory-modal-close" aria-label="Close" onclick="this.closest('.restic-inventory-modal-root').remove();">
+              <span aria-hidden="true">&times;</span>
+            </button>
+          @endif
         </div>
         <div class="box-body">
           @if(session('admin_tool_server_uuid'))
@@ -222,6 +237,10 @@
     @endif
   </div>
 </div>
+
+@if($isInventoryModal)
+</div>
+@endif
 
 <div class="row">
   <div class="col-xs-12">
@@ -452,6 +471,33 @@
   .restic-guide pre { background:#111827; color:#e5e7eb; padding:12px; border-radius:4px; overflow:auto; }
   .restic-guide pre code { background:transparent; padding:0; }
   .restic-result-pre { white-space:pre-wrap; word-break:break-word; max-height:420px; overflow:auto; }
+  .restic-inventory-modal-backdrop {
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,.62);
+    z-index:1040;
+  }
+  .restic-inventory-modal-box {
+    position:fixed;
+    top:72px;
+    left:50%;
+    transform:translateX(-50%);
+    width:min(1280px, calc(100vw - 40px));
+    max-height:calc(100vh - 104px);
+    overflow:auto;
+    z-index:1050;
+    box-shadow:0 18px 60px rgba(0,0,0,.55);
+  }
+  .restic-inventory-modal-close {
+    color:#e5e7eb;
+    opacity:.95;
+    text-shadow:none;
+  }
+  .restic-inventory-modal-close:hover,
+  .restic-inventory-modal-close:focus {
+    color:#fff;
+    opacity:1;
+  }
   .restic-inventory-panel {
     background:#111827;
     border:1px solid #374151;
