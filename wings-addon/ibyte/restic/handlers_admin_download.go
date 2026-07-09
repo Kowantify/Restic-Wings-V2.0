@@ -471,6 +471,9 @@ func listRepoDirs(root string, skip map[string]bool) ([]gin.H, error) {
 		if skip != nil && skip[name] {
 			continue
 		}
+		if isIgnoredInventoryEntry(name) {
+			continue
+		}
 
 		path, err := cleanUnder(root, filepath.Join(root, name))
 		if err != nil {
@@ -493,6 +496,15 @@ func listRepoDirs(root string, skip map[string]bool) ([]gin.H, error) {
 	}
 
 	return repos, nil
+}
+
+func isIgnoredInventoryEntry(name string) bool {
+	switch name {
+	case ".download-status", ".prune-status", ".restore-status", ".status", ".lock-status", ".backup-status", ".check-status":
+		return true
+	default:
+		return false
+	}
 }
 
 func archiveRepoByName(c *gin.Context) {

@@ -115,15 +115,15 @@
                   $liveRepos = data_get($body, 'live_repos', []);
                   $archivedRepos = data_get($body, 'archived_repos', []);
                 @endphp
-                <div class="panel panel-default">
-                  <div class="panel-heading">
+                <div class="restic-inventory-panel">
+                  <div class="restic-inventory-heading">
                     <strong>{{ data_get($node, 'node_name', 'Unknown node') }}</strong>
                     <span class="label label-{{ $status === 'ok' ? 'success' : ($status === 'skipped' ? 'default' : 'danger') }}">{{ $status }}</span>
                     @if(data_get($node, 'probe_server_uuid'))
                       <span class="text-muted">via <code>{{ data_get($node, 'probe_server_uuid') }}</code></span>
                     @endif
                   </div>
-                  <div class="panel-body">
+                  <div class="restic-inventory-body">
                     @if(data_get($node, 'message'))
                       <p class="text-muted">{{ data_get($node, 'message') }}</p>
                     @endif
@@ -137,14 +137,29 @@
                           <h4>Live Repos</h4>
                           @if(count($liveRepos))
                             <div class="table-responsive" style="max-height:220px; overflow:auto;">
-                              <table class="table table-condensed">
-                                <thead><tr><th>Name</th><th>Config</th><th>Modified</th><th>Action</th></tr></thead>
+                              <table class="table table-condensed restic-inventory-table">
+                                <thead><tr><th>Name</th><th>Status</th><th>Last Modified</th><th>Action</th></tr></thead>
                                 <tbody>
                                   @foreach($liveRepos as $repo)
                                     <tr>
-                                      <td style="word-break:break-all;"><code>{{ data_get($repo, 'name') }}</code></td>
-                                      <td>{!! data_get($repo, 'has_config') ? '<span class="label label-success">yes</span>' : '<span class="label label-warning">no</span>' !!}</td>
-                                      <td class="text-muted small">{{ data_get($repo, 'modified') }}</td>
+                                      <td style="word-break:break-all;">
+                                        <code>{{ data_get($repo, 'name') }}</code>
+                                        @if(data_get($repo, 'server_name'))
+                                          <div class="text-muted small">{{ data_get($repo, 'server_name') }} / {{ data_get($repo, 'owner_username') ?: 'unknown owner' }}</div>
+                                        @endif
+                                      </td>
+                                      <td>
+                                        @if(data_get($repo, 'attached'))
+                                          <span class="label label-success">attached</span>
+                                        @else
+                                          <span class="label label-warning">dormant</span>
+                                          <div class="text-muted small">No live server row matched this repo.</div>
+                                        @endif
+                                        @if(!data_get($repo, 'has_config'))
+                                          <div><span class="label label-danger">invalid</span></div>
+                                        @endif
+                                      </td>
+                                      <td class="text-muted small">{{ data_get($repo, 'modified') ?: 'unknown' }}</td>
                                       <td>
                                         @if(data_get($repo, 'has_config'))
                                           <form method="POST" action="/admin/extensions/resticbackups" style="display:inline;">
@@ -176,14 +191,14 @@
                           <h4>Archived Repos</h4>
                           @if(count($archivedRepos))
                             <div class="table-responsive" style="max-height:220px; overflow:auto;">
-                              <table class="table table-condensed">
-                                <thead><tr><th>Name</th><th>Config</th><th>Modified</th></tr></thead>
+                              <table class="table table-condensed restic-inventory-table">
+                                <thead><tr><th>Name</th><th>Config</th><th>Last Modified</th></tr></thead>
                                 <tbody>
                                   @foreach($archivedRepos as $repo)
                                     <tr>
                                       <td style="word-break:break-all;"><code>{{ data_get($repo, 'name') }}</code></td>
                                       <td>{!! data_get($repo, 'has_config') ? '<span class="label label-success">yes</span>' : '<span class="label label-warning">no</span>' !!}</td>
-                                      <td class="text-muted small">{{ data_get($repo, 'modified') }}</td>
+                                      <td class="text-muted small">{{ data_get($repo, 'modified') ?: 'unknown' }}</td>
                                     </tr>
                                   @endforeach
                                 </tbody>
@@ -359,47 +374,23 @@
           <button type="submit" class="btn btn-info" name="action" value="admin_repo_inventory">Scan Actual Node Repos</button>
           <span class="text-muted small">Lists live leftovers and actual archived Restic repo directories that physically exist on each node.</span>
         </form>
-        <form method="GET" action="/admin/extensions/resticbackups" style="margin-bottom:14px;">
-          <div class="row">
-            <div class="col-xs-12 col-md-7">
-              <label class="control-label">Search history</label>
-              <input
-                class="form-control"
-                name="historical_search"
-                placeholder="Search by server UUID or owner username"
-                value="{{ $historicalSearch ?? '' }}"
-              >
-            </div>
-            <div class="col-xs-12 col-md-5" style="padding-top:25px;">
-              <button type="submit" class="btn btn-primary">Search</button>
-              @if(!empty($historicalSearch))
-                <a href="/admin/extensions/resticbackups" class="btn btn-default">Clear</a>
-              @endif
-            </div>
-          </div>
-        </form>
         @if(isset($keyHistoryOptions) && $keyHistoryOptions->count())
           <form method="POST" action="/admin/extensions/resticbackups" style="margin-bottom:14px;">
             @csrf
             <div class="row">
               <div class="col-xs-12 col-md-7">
                 <div class="form-group">
-                  <label class="control-label">Search archived or historical server</label>
-                  <input
-                    class="form-control"
-                    name="server_uuid"
-                    list="restic-archived-server-options"
-                    placeholder="Type a server UUID or select from history"
-                    value="{{ session('admin_tool_server_uuid') }}"
-                    required
-                  >
-                  <datalist id="restic-archived-server-options">
+                  <label class="control-label">Select archived or historical server</label>
+                  <select class="form-control" name="server_uuid" required>
+                    <option value="">Select a server from key history</option>
                     @foreach($keyHistoryOptions as $row)
-                      <option value="{{ $row->server_uuid }}">{{ $row->owner_username ?: 'Unknown owner' }} - latest key {{ $row->latest_created_at }}</option>
+                      <option value="{{ $row->server_uuid }}" @if(session('admin_tool_server_uuid') === $row->server_uuid) selected @endif>
+                        {{ $row->server_name ?: 'Deleted / unknown server' }} - {{ $row->owner_username ?: 'Unknown owner' }} - {{ $row->server_uuid }} - latest key {{ $row->latest_created_at }}
+                      </option>
                     @endforeach
-                  </datalist>
+                  </select>
                   <p class="help-block">
-                    Use this to recover preserved keys. This list shows {{ empty($historicalSearch) ? 'the 5 most recent historical key records' : 'matching historical key records' }}.
+                    This dropdown lists grouped key-history records. The table below only shows the last 5.
                   </p>
                 </div>
               </div>
@@ -413,16 +404,17 @@
             <table class="table table-condensed">
               <thead>
                 <tr>
-                  <th colspan="3">{{ empty($historicalSearch) ? 'Recent Historical Key Records' : 'Historical Key Search Results' }}</th>
+                  <th colspan="4">Last 5 Historical Key Records</th>
                 </tr>
-                <tr><th>Server UUID</th><th>Last Known Owner</th><th>Latest Key Record</th></tr>
+                <tr><th>Server</th><th>Server UUID</th><th>Last Known Owner</th><th>Latest Key Record</th></tr>
               </thead>
               <tbody>
-                @foreach($keyHistoryOptions as $row)
+                @foreach($keyHistoryOptions->take(5) as $row)
                   @php
                     $owner = $row->owner_username ?: 'unknown';
                   @endphp
                   <tr>
+                    <td>{{ $row->server_name ?: 'Deleted / unknown server' }}</td>
                     <td><code>{{ $row->server_uuid }}</code></td>
                     <td>{{ $owner }}</td>
                     <td class="text-muted small">{{ $row->latest_created_at }}</td>
@@ -462,5 +454,44 @@
   .restic-guide pre { background:#111827; color:#e5e7eb; padding:12px; border-radius:4px; overflow:auto; }
   .restic-guide pre code { background:transparent; padding:0; }
   .restic-result-pre { white-space:pre-wrap; word-break:break-word; max-height:420px; overflow:auto; }
+  .restic-inventory-panel {
+    background:#111827;
+    border:1px solid #374151;
+    border-radius:4px;
+    margin-bottom:14px;
+  }
+  .restic-inventory-heading {
+    background:#1f2937;
+    border-bottom:1px solid #374151;
+    color:#f9fafb;
+    padding:10px 12px;
+  }
+  .restic-inventory-body {
+    color:#d1d5db;
+    padding:12px;
+  }
+  .restic-inventory-body h4 {
+    color:#f9fafb;
+    margin-top:0;
+  }
+  .restic-inventory-table {
+    background:#111827;
+    color:#d1d5db;
+    margin-bottom:0;
+  }
+  .restic-inventory-table > thead > tr > th {
+    background:#1f2937;
+    border-color:#374151;
+    color:#f9fafb;
+  }
+  .restic-inventory-table > tbody > tr > td {
+    border-color:#374151;
+    vertical-align:middle;
+  }
+  .restic-inventory-table code,
+  .restic-inventory-panel code {
+    background:#0b1220;
+    color:#e5e7eb;
+  }
   .box-body form .btn { margin:0 6px 6px 0; }
 </style>

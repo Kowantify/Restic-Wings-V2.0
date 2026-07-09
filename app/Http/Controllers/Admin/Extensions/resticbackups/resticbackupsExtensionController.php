@@ -536,6 +536,9 @@ class resticbackupsExtensionController extends Controller
                 ]);
 
                 $body = $this->decodeResponseBody($response);
+                if ($response->getStatusCode() < 300 && is_array($body)) {
+                    $body = $this->annotateRepoInventory((int) $node->id, $body);
+                }
                 $results[] = [
                     'node_id' => $node->id,
                     'node_name' => $node->name ?? ('Node ' . $node->id),
@@ -557,6 +560,50 @@ class resticbackupsExtensionController extends Controller
         return $this->adminToolOutput('Node Repo Inventory', [
             'nodes' => $results,
         ]);
+    }
+
+    private function annotateRepoInventory(int $nodeId, array $body): array
+    {
+        $servers = \DB::table('servers')
+            ->leftJoin('users', 'servers.owner_id', '=', 'users.id')
+            ->where('servers.node_id', $nodeId)
+            ->select('servers.uuid', 'servers.name', 'users.username as owner_username')
+            ->get();
+
+        $liveRepoNames = [];
+        $liveServerUuids = [];
+        foreach ($servers as $server) {
+            $uuid = (string) $server->uuid;
+            $owner = (string) ($server->owner_username ?? '');
+            $liveServerUuids[$uuid] = [
+                'server_uuid' => $uuid,
+                'server_name' => $server->name,
+                'owner_username' => $owner,
+            ];
+            $liveRepoNames[$uuid] = $liveServerUuids[$uuid];
+            if ($owner !== '') {
+                $liveRepoNames[$uuid . '+' . $owner] = $liveServerUuids[$uuid];
+            }
+        }
+
+        $body['live_repos'] = collect($body['live_repos'] ?? [])->map(function ($repo) use ($liveRepoNames, $liveServerUuids) {
+            $repo = is_array($repo) ? $repo : (array) $repo;
+            $name = (string) ($repo['name'] ?? '');
+            $uuidFromName = explode('+', $name, 2)[0];
+            $match = $liveRepoNames[$name] ?? ($liveServerUuids[$uuidFromName] ?? null);
+
+            $repo['attached'] = $match !== null;
+            $repo['status'] = $match ? 'attached' : 'dormant';
+            $repo['server_uuid'] = $match['server_uuid'] ?? $uuidFromName;
+            $repo['server_name'] = $match['server_name'] ?? null;
+            $repo['owner_username'] = $match['owner_username'] ?? null;
+
+            return $repo;
+        })->values()->all();
+
+        $body['live_server_count'] = count($liveServerUuids);
+
+        return $body;
     }
 
     private function archiveRepoByName(Request $request): RedirectResponse
@@ -737,23 +784,17 @@ class resticbackupsExtensionController extends Controller
             ];
         }
 
-        $historicalSearch = trim((string) request()->query('historical_search', ''));
-        $keyHistoryOptionsQuery = \DB::table('restic_key_history')
-            ->select('server_uuid', 'owner_username')
-            ->selectRaw('MAX(created_at) as latest_created_at')
-            ->groupBy('server_uuid', 'owner_username');
-
-        if ($historicalSearch !== '') {
-            $like = '%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $historicalSearch) . '%';
-            $keyHistoryOptionsQuery->where(function ($query) use ($like) {
-                $query->where('server_uuid', 'like', $like)
-                    ->orWhere('owner_username', 'like', $like);
-            });
-        }
-
-        $keyHistoryOptions = $keyHistoryOptionsQuery
+        $keyHistoryOptions = \DB::table('restic_key_history')
+            ->leftJoin('servers', 'restic_key_history.server_uuid', '=', 'servers.uuid')
+            ->select(
+                'restic_key_history.server_uuid',
+                'restic_key_history.owner_username',
+                'servers.name as server_name'
+            )
+            ->selectRaw('MAX(restic_key_history.created_at) as latest_created_at')
+            ->groupBy('restic_key_history.server_uuid', 'restic_key_history.owner_username', 'servers.name')
             ->orderBy('latest_created_at', 'desc')
-            ->limit($historicalSearch !== '' ? 50 : 5)
+            ->limit(1000)
             ->get();
 
         $failedJobs = \DB::table('restic_job_history')
@@ -791,7 +832,6 @@ class resticbackupsExtensionController extends Controller
             'guide'     => $guideContents,
             'repoMultiplier' => $repoMultiplier,
             'keyHistoryOptions' => $keyHistoryOptions,
-            'historicalSearch' => $historicalSearch,
             'failedJobs' => $failedJobs,
         ]);
     }
