@@ -67,7 +67,13 @@
             @if(!$output && $status === 'running')
               <p class="text-muted">The check is still running on Wings. Run the health check again in a moment to refresh the status.</p>
             @endif
-          @elseif($toolTitle === 'Current Encryption Key' && is_array($toolPayload))
+          @elseif(($toolTitle === 'Current Encryption Key' || $toolTitle === 'Latest Historical Encryption Key') && is_array($toolPayload))
+            @if(data_get($toolPayload, 'owner_username'))
+              <p><strong>Owner:</strong> {{ data_get($toolPayload, 'owner_username') }}</p>
+            @endif
+            @if(data_get($toolPayload, 'created_at'))
+              <p><strong>Key record:</strong> {{ data_get($toolPayload, 'created_at') }}</p>
+            @endif
             @if(data_get($toolPayload, 'encryption_key'))
               <code style="word-break:break-all; white-space:normal; display:block;">{{ data_get($toolPayload, 'encryption_key') }}</code>
             @else
@@ -181,6 +187,7 @@
                 <option value="{{ $server->server_uuid }}" @if(session('admin_tool_server_uuid') === $server->server_uuid) selected @endif>{{ $server->server_name }} ({{ $server->server_uuid }})</option>
               @endforeach
             </select>
+            <p class="help-block">Current live servers only. Deleted and archived server keys are in the Archived / Historical Servers section below.</p>
           </div>
           <button type="submit" class="btn btn-warning" name="action" value="admin_reveal_key" onclick="return confirm('Reveal this server encryption key?');">Reveal Current Key</button>
           <button type="submit" class="btn btn-default" name="action" value="admin_key_history">Load Key History</button>
@@ -208,6 +215,7 @@
           </div>
           <button type="submit" class="btn btn-warning" name="action" value="admin_unlock_repo" onclick="return confirm('Unlock this repository?');">Unlock Repo</button>
           <button type="submit" class="btn btn-danger" name="action" value="admin_force_unlock_repo" onclick="return confirm('Force unlock only if no backup is running. Continue?');">Force Unlock Repo</button>
+          <button type="submit" class="btn btn-warning" name="action" value="archive_repo" onclick="return confirm('Create a final locked backup if possible and move this repo to the archive folder?');">Archive Repo</button>
           <button type="submit" class="btn btn-danger" name="action" value="generate_key" onclick="return confirm('Generate a new encryption key? Existing backups may become unrecoverable if the old key is lost.');">Generate New Key</button>
           <button type="submit" class="btn btn-danger" name="action" value="delete_repo" onclick="return confirm('Delete this server Restic repository? This cannot be undone.');">Delete Repo</button>
         </form>
@@ -237,6 +245,68 @@
           </div>
         @else
           <div class="text-muted">No failed jobs recorded.</div>
+        @endif
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="col-xs-12">
+    <div class="box box-default">
+      <div class="box-header with-border"><h3 class="box-title">Archived / Historical Servers</h3></div>
+      <div class="box-body">
+        <p class="text-muted small">Recovery candidates are based on preserved key history. Older deleted servers can be recovered if their repo still exists in the node archive folder.</p>
+        @if(isset($keyHistoryOptions) && $keyHistoryOptions->count())
+          <form method="POST" action="/admin/extensions/resticbackups" style="margin-bottom:14px;">
+            @csrf
+            <div class="row">
+              <div class="col-xs-12 col-md-7">
+                <div class="form-group">
+                  <label class="control-label">Search archived or historical server</label>
+                  <input
+                    class="form-control"
+                    name="server_uuid"
+                    list="restic-archived-server-options"
+                    placeholder="Type a server UUID or select from history"
+                    value="{{ session('admin_tool_server_uuid') }}"
+                    required
+                  >
+                  <datalist id="restic-archived-server-options">
+                    @foreach($keyHistoryOptions as $row)
+                      <option value="{{ $row->server_uuid }}">{{ $row->owner_username ?: 'Unknown owner' }} - latest key {{ $row->latest_created_at }}</option>
+                    @endforeach
+                  </datalist>
+                  <p class="help-block">Use this for deleted servers or old repos. It reads from preserved Restic key history, not the live server table.</p>
+                </div>
+              </div>
+              <div class="col-xs-12 col-md-5" style="padding-top:25px;">
+                <button type="submit" class="btn btn-warning" name="action" value="admin_reveal_historical_key" onclick="return confirm('Reveal the latest historical key for this server UUID?');">Reveal Latest Historical Key</button>
+                <button type="submit" class="btn btn-default" name="action" value="admin_key_history">Load Full Key History</button>
+              </div>
+            </div>
+          </form>
+          <div class="table-responsive" style="max-height:360px; overflow:auto;">
+            <table class="table table-condensed">
+              <thead><tr><th>Server UUID</th><th>Last Known Owner</th><th>Expected Archive Path</th><th>Latest Key Record</th></tr></thead>
+              <tbody>
+                @foreach($keyHistoryOptions as $row)
+                  @php
+                    $owner = $row->owner_username ?: 'unknown';
+                    $repoName = $row->owner_username ? $row->server_uuid . '+' . $row->owner_username : $row->server_uuid;
+                  @endphp
+                  <tr>
+                    <td><code>{{ $row->server_uuid }}</code></td>
+                    <td>{{ $owner }}</td>
+                    <td style="word-break:break-all;"><code>/var/lib/pterodactyl/restic/archive/{{ $repoName }}</code></td>
+                    <td class="text-muted small">{{ $row->latest_created_at }}</td>
+                  </tr>
+                @endforeach
+              </tbody>
+            </table>
+          </div>
+        @else
+          <div class="text-muted">No historical key records found.</div>
         @endif
       </div>
     </div>

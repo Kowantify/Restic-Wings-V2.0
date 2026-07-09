@@ -27,6 +27,7 @@ func Register(group *gin.RouterGroup) {
 	group.POST("/unlock", unlockRepo)
 	group.POST("/repo/exists", repoExists)
 	group.POST("/repo/size", repoSize)
+	group.POST("/repo/archive", archiveRepo)
 	group.DELETE("/repo", deleteRepo)
 }
 

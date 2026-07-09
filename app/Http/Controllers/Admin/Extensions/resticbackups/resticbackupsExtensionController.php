@@ -375,6 +375,100 @@ class resticbackupsExtensionController extends Controller
         return redirect()->back()->with(['encryption_key_success' => 'Restic repo deleted on Wings.']);
     }
 
+    public function archiveResticRepo(Request $request): RedirectResponse
+    {
+        $this->requireAdmin(auth()->user());
+
+        $uuid = $request->input('server_uuid');
+
+        if (!$uuid) {
+            return redirect()->back()->withErrors(['server_uuid' => 'Server UUID required']);
+        }
+
+        $serverRow = \DB::table('servers')->where('uuid', $uuid)->first();
+        if (!$serverRow) {
+            return redirect()->back()->withErrors(['server_uuid' => 'Server not found.']);
+        }
+
+        $ownerUsername = $this->getResticOwnerUsername($serverRow);
+        $archiveResult = $this->archiveResticRepoOnWings($serverRow, $ownerUsername);
+        if (!$archiveResult['ok']) {
+            return redirect()->back()->withErrors(['server_uuid' => $archiveResult['error'] ?? 'Failed to archive repo on Wings.']);
+        }
+
+        return redirect()->back()->with(['success' => 'Restic repo archived on Wings.']);
+    }
+
+    private function archiveResticRepoOnWings(object $serverRow, ?string $ownerUsername): array
+    {
+        $node = \DB::table('nodes')->where('id', $serverRow->node_id)->first();
+        if (!$node) {
+            $this->recordJobFailure($serverRow->uuid, 'archive_repo', 'Node not found');
+            return ['ok' => false, 'error' => 'Node not found.'];
+        }
+
+        $port = property_exists($node, 'daemonListen')
+            ? $node->daemonListen
+            : (property_exists($node, 'daemon_listen') ? $node->daemon_listen : 8080);
+        $nodeApiUrl = 'https://' . $node->fqdn . ':' . $port;
+
+        $encryptedToken = $node->daemon_token ?? null;
+        if (!$encryptedToken) {
+            $this->recordJobFailure($serverRow->uuid, 'archive_repo', 'Node daemon token missing');
+            return ['ok' => false, 'error' => 'Node daemon token missing.'];
+        }
+
+        try {
+            $token = app('encrypter')->decrypt($encryptedToken);
+        } catch (\Exception $e) {
+            $this->recordJobFailure($serverRow->uuid, 'archive_repo', 'Failed to decrypt daemon token', [
+                'exception' => $e->getMessage(),
+            ]);
+            return ['ok' => false, 'error' => 'Failed to decrypt daemon token.'];
+        }
+
+        $encryptionKey = \DB::table('restic')->where('server_uuid', $serverRow->uuid)->value('encryption_key');
+        if (!is_string($encryptionKey) || $encryptionKey === '') {
+            $this->recordJobFailure($serverRow->uuid, 'archive_repo', 'Encryption key missing');
+            return ['ok' => false, 'error' => 'Encryption key missing.'];
+        }
+
+        try {
+            $client = new \GuzzleHttp\Client(['timeout' => 21600]);
+            $response = $client->post($nodeApiUrl . '/api/servers/' . $serverRow->uuid . '/restic/repo/archive', [
+                'http_errors' => false,
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $token,
+                    'Accept'        => 'application/json',
+                    'Content-Type'  => 'application/json',
+                ],
+                'json' => [
+                    'owner_username' => $ownerUsername,
+                    'encryption_key' => $encryptionKey,
+                ],
+            ]);
+
+            $rawBody = (string) $response->getBody();
+            $body = json_decode($rawBody, true) ?: [];
+            if ($response->getStatusCode() >= 300) {
+                $this->recordJobFailure($serverRow->uuid, 'archive_repo', $rawBody ?: 'Failed to archive repo on Wings', [
+                    'status' => $response->getStatusCode(),
+                    'response' => $rawBody,
+                ]);
+                return ['ok' => false, 'error' => $rawBody ?: 'Failed to archive repo on Wings.'];
+            }
+
+            self::recordResticKeyHistory($serverRow->uuid, $ownerUsername, $encryptionKey, now());
+
+            return ['ok' => true, 'body' => $body];
+        } catch (\Exception $e) {
+            $this->recordJobFailure($serverRow->uuid, 'archive_repo', $e->getMessage(), [
+                'exception' => $e->getMessage(),
+            ]);
+            return ['ok' => false, 'error' => 'Failed to archive repo on Wings.'];
+        }
+    }
+
     private function deleteResticRepoOnWings(object $serverRow, ?string $ownerUsername): array
     {
         $node = \DB::table('nodes')->where('id', $serverRow->node_id)->first();
@@ -689,6 +783,20 @@ class resticbackupsExtensionController extends Controller
             ], $serverUuid);
         }
 
+        if ($action === 'admin_reveal_historical_key') {
+            $row = \DB::table('restic_key_history')
+                ->where('server_uuid', $serverUuid)
+                ->orderBy('created_at', 'desc')
+                ->first();
+
+            return $this->adminToolOutput('Latest Historical Encryption Key', [
+                'server_uuid' => $serverUuid,
+                'owner_username' => $row->owner_username ?? null,
+                'created_at' => $row->created_at ?? null,
+                'encryption_key' => isset($row->encryption_key) && is_string($row->encryption_key) ? $row->encryption_key : null,
+            ], $serverUuid);
+        }
+
         if ($action === 'admin_key_history') {
             $rows = \DB::table('restic_key_history')
                 ->where('server_uuid', $serverUuid)
@@ -728,6 +836,9 @@ class resticbackupsExtensionController extends Controller
         }
         if ($action === 'delete_repo') {
             return $this->deleteResticRepo($request);
+        }
+        if ($action === 'archive_repo') {
+            return $this->archiveResticRepo($request);
         }
         if ($action === 'save_repo_multiplier') {
             $value = $request->input('repo_multiplier');
@@ -1310,9 +1421,7 @@ class resticbackupsExtensionController extends Controller
         $encryptionKey = $ctx['encryptionKey'];
         $ownerUsername = $ctx['ownerUsername'];
         $delivery = $request->input('delivery') === 'sftp' ? 'sftp' : 'stream';
-        $archiveFormat = in_array($request->input('archive_format'), ['zip', 'tar.zst'], true)
-            ? $request->input('archive_format')
-            : 'zip';
+        $archiveFormat = 'tar.zst';
 
         // Prepare the archive on Wings (server-to-server only)
         try {
@@ -1453,7 +1562,7 @@ class resticbackupsExtensionController extends Controller
 
             $headers = [
                 'Content-Type' => $resp->getHeaderLine('Content-Type') ?: 'application/octet-stream',
-                'Content-Disposition' => $resp->getHeaderLine('Content-Disposition') ?: ('attachment; filename="backup-' . $backupId . '.zip"'),
+                'Content-Disposition' => $resp->getHeaderLine('Content-Disposition') ?: ('attachment; filename="backup-' . $backupId . '.tar.zst"'),
                 'X-Accel-Buffering' => 'no',
                 'Cache-Control' => 'no-store',
             ];
@@ -1524,9 +1633,7 @@ class resticbackupsExtensionController extends Controller
         $encryptionKey = $ctx['encryptionKey'];
         $ownerUsername = $ctx['ownerUsername'];
         $delivery = $request->input('delivery') === 'sftp' ? 'sftp' : 'stream';
-        $archiveFormat = in_array($request->input('archive_format'), ['zip', 'tar.zst'], true)
-            ? $request->input('archive_format')
-            : 'zip';
+        $archiveFormat = 'tar.zst';
 
         try {
             $client = new \GuzzleHttp\Client();

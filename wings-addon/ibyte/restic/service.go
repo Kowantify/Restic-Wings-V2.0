@@ -2,9 +2,6 @@ package restic
 
 import (
 	"archive/tar"
-	"archive/zip"
-	"compress/flate"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,6 +43,7 @@ type resticRequest struct {
 }
 
 const exportDirName = ".restic-downloads"
+const archivedTag = "archived"
 
 type pruneRequest struct {
     resticRequest
@@ -116,6 +114,10 @@ func repoRoot() string {
     return filepath.Join(config.Get().System.Data, "..", "restic")
 }
 
+func archiveRoot() string {
+    return filepath.Join(repoRoot(), "archive")
+}
+
 func cleanUnder(root, child string) (string, error) {
     path, err := cleanUnderOrEqual(root, child)
     if err != nil {
@@ -166,6 +168,11 @@ func repoPath(serverID, owner string) (string, error) {
         return cleanUnder(root, serverOnly)
     }
     return cleanUnder(root, preferred)
+}
+
+func archivedRepoPath(serverID, owner string) (string, error) {
+    root := archiveRoot()
+    return cleanUnder(root, filepath.Join(root, repoName(serverID, owner)))
 }
 
 func volumePath(serverID string) (string, error) {
@@ -278,33 +285,19 @@ func isResticExportArchive(name string) bool {
     if !strings.HasPrefix(name, "restic-backup-") {
         return false
     }
-    return strings.HasSuffix(name, ".zip") ||
-        strings.HasSuffix(name, ".tar.zst") ||
-        strings.HasSuffix(name, ".tar.gz") ||
-        strings.HasSuffix(name, ".tgz")
+    return strings.HasSuffix(name, ".tar.zst")
 }
 
 func normalizeArchiveFormat(format string) string {
-    switch strings.ToLower(strings.TrimSpace(format)) {
-    case "zst", "tar.zst", "tzst":
-        return "tar.zst"
-    default:
-        return "zip"
-    }
+    return "tar.zst"
 }
 
 func archiveExtension(format string) string {
-    if normalizeArchiveFormat(format) == "tar.zst" {
-        return ".tar.zst"
-    }
-    return ".zip"
+    return ".tar.zst"
 }
 
 func archiveContentType(format string) string {
-    if normalizeArchiveFormat(format) == "tar.zst" {
-        return "application/zstd"
-    }
-    return "application/zip"
+    return "application/zstd"
 }
 
 func repoDiskSize(repo string) (int64, error) {
@@ -543,71 +536,6 @@ func lockForServer(serverID string) *sync.Mutex {
     return lock.(*sync.Mutex)
 }
 
-func writeTarGz(source, target string) error {
-    return writeTarGzWithRoot(source, target, "")
-}
-
-func writeTarGzWithRoot(source, target, rootName string) error {
-    rootName = strings.Trim(filepath.ToSlash(rootName), "/")
-    if rootName != "" && (!safeID.MatchString(rootName) || strings.Contains(rootName, "..")) {
-        return errors.New("invalid archive root name")
-    }
-    if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-        return err
-    }
-    file, err := os.Create(target)
-    if err != nil {
-        return err
-    }
-    defer file.Close()
-    gzipWriter := gzip.NewWriter(file)
-    defer gzipWriter.Close()
-    tarWriter := tar.NewWriter(gzipWriter)
-    defer tarWriter.Close()
-
-    return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
-        if err != nil {
-            return err
-        }
-        if path == source {
-            if rootName == "" {
-                return nil
-            }
-            header, err := tar.FileInfoHeader(info, "")
-            if err != nil {
-                return err
-            }
-            header.Name = rootName
-            return tarWriter.WriteHeader(header)
-        }
-        rel, err := filepath.Rel(source, path)
-        if err != nil {
-            return err
-        }
-        header, err := tar.FileInfoHeader(info, "")
-        if err != nil {
-            return err
-        }
-        header.Name = filepath.ToSlash(rel)
-        if rootName != "" {
-            header.Name = filepath.ToSlash(filepath.Join(rootName, rel))
-        }
-        if err := tarWriter.WriteHeader(header); err != nil {
-            return err
-        }
-        if info.IsDir() {
-            return nil
-        }
-        in, err := os.Open(path)
-        if err != nil {
-            return err
-        }
-        defer in.Close()
-        _, err = io.Copy(tarWriter, in)
-        return err
-    })
-}
-
 func writeTarZstWithRoot(source, target, rootName string) error {
     rootName = strings.Trim(filepath.ToSlash(rootName), "/")
     if rootName != "" && (!safeID.MatchString(rootName) || strings.Contains(rootName, "..")) {
@@ -687,76 +615,6 @@ func writeTarZstWithRoot(source, target, rootName string) error {
         return pipeErr
     }
     return waitErr
-}
-
-func writeZipFastWithRoot(source, target, rootName string) error {
-    rootName = strings.Trim(filepath.ToSlash(rootName), "/")
-    if rootName != "" && (!safeID.MatchString(rootName) || strings.Contains(rootName, "..")) {
-        return errors.New("invalid archive root name")
-    }
-    if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-        return err
-    }
-    file, err := os.Create(target)
-    if err != nil {
-        return err
-    }
-    defer file.Close()
-
-    zipWriter := zip.NewWriter(file)
-    defer zipWriter.Close()
-    zipWriter.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) {
-        return flate.NewWriter(out, flate.BestSpeed)
-    })
-
-    return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
-        if err != nil {
-            return err
-        }
-
-        name := ""
-        if path == source {
-            if rootName == "" {
-                return nil
-            }
-            name = rootName
-        } else {
-            rel, err := filepath.Rel(source, path)
-            if err != nil {
-                return err
-            }
-            name = filepath.ToSlash(rel)
-            if rootName != "" {
-                name = filepath.ToSlash(filepath.Join(rootName, rel))
-            }
-        }
-
-        header, err := zip.FileInfoHeader(info)
-        if err != nil {
-            return err
-        }
-        header.Name = name
-        if info.IsDir() && !strings.HasSuffix(header.Name, "/") {
-            header.Name += "/"
-        }
-        header.Method = zip.Deflate
-
-        writer, err := zipWriter.CreateHeader(header)
-        if err != nil {
-            return err
-        }
-        if info.IsDir() {
-            return nil
-        }
-
-        in, err := os.Open(path)
-        if err != nil {
-            return err
-        }
-        defer in.Close()
-        _, err = io.Copy(writer, in)
-        return err
-    })
 }
 
 func directorySize(path string) (int64, error) {

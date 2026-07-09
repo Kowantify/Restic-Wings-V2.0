@@ -1,5 +1,5 @@
 info:
-  name: "resticbackups"
+  name: "iByte-ResticBackups"
   identifier: "resticbackups"
   description: "restic backups"
   flags: ""

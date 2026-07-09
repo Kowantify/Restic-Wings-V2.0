@@ -163,11 +163,7 @@ func prepareDownload(c *gin.Context) {
                     }
                 }
                 if err == nil {
-                    if archiveFormat == "tar.zst" {
-                        err = writeTarZstWithRoot(archiveSource, archivePath, sid)
-                    } else {
-                        err = writeZipFastWithRoot(archiveSource, archivePath, sid)
-                    }
+                    err = writeTarZstWithRoot(archiveSource, archivePath, sid)
                 }
             }
         }
@@ -269,13 +265,10 @@ func streamDownload(c *gin.Context) {
     }
     archiveFormat, _ := state.Result["archive_format"].(string)
     archiveFormat = normalizeArchiveFormat(archiveFormat)
+    archiveName := fmt.Sprintf("restic-%s-%s%s", serverID(c), snapshotID, archiveExtension(archiveFormat))
     c.Header("Content-Type", archiveContentType(archiveFormat))
-    c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"restic-%s-%s%s\"", serverID(c), snapshotID, archiveExtension(archiveFormat)))
-    c.File(archivePath)
-    go func() {
-        time.Sleep(30 * time.Second)
-        _ = os.RemoveAll(filepath.Dir(archivePath))
-    }()
+    defer os.RemoveAll(filepath.Dir(archivePath))
+    c.FileAttachment(archivePath, archiveName)
 }
 
 func stats(c *gin.Context) {
@@ -451,4 +444,101 @@ func deleteRepo(c *gin.Context) {
         return
     }
     c.JSON(http.StatusOK, gin.H{"message": "repo deleted"})
+}
+
+func archiveRepo(c *gin.Context) {
+    req, err := bindResticRequest(c, true)
+    if err != nil {
+        errorJSON(c, http.StatusUnprocessableEntity, err.Error())
+        return
+    }
+
+    sid := serverID(c)
+    repo, err := repoPath(sid, req.OwnerUsername)
+    if err != nil {
+        errorJSON(c, http.StatusBadRequest, err.Error())
+        return
+    }
+    archivePath, err := archivedRepoPath(sid, req.OwnerUsername)
+    if err != nil {
+        errorJSON(c, http.StatusBadRequest, err.Error())
+        return
+    }
+    volume, volumeErr := volumePath(sid)
+
+    lock := lockForServer(sid)
+    lock.Lock()
+    defer lock.Unlock()
+
+    ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
+    defer cancel()
+
+    finalBackupCreated := false
+    finalSnapshotLocked := false
+    finalSnapshotID := ""
+    backupMessage := ""
+
+    if volumeErr == nil {
+        if info, statErr := os.Stat(volume); statErr == nil && info.IsDir() {
+            if err := ensureRepo(ctx, repo, req.EncryptionKey); err != nil {
+                errorJSON(c, http.StatusBadGateway, err.Error())
+                return
+            }
+
+            _, stderr, backupErr := runRestic(ctx, repo, req.EncryptionKey, "backup", volume, "--json", "--tag", "pterodactyl", "--tag", sid, "--tag", archivedTag, "--exclude", filepath.Join(volume, exportDirName), "--exclude", filepath.Join(volume, exportDirName, "*"), "--exclude", filepath.Join(volume, "restic-backup-*.tar.zst"))
+            if backupErr != nil {
+                backupMessage = strings.TrimSpace(string(stderr))
+            } else {
+                finalBackupCreated = true
+            }
+        }
+    }
+
+    snaps, snapErr := listSnapshots(ctx, repo, req.EncryptionKey)
+    if snapErr != nil {
+        errorJSON(c, http.StatusBadGateway, snapErr.Error())
+        return
+    }
+    if volumeErr == nil {
+        snaps = filterSnapshotsForServer(snaps, sid, volume)
+    }
+    if len(snaps) > 0 {
+        finalSnapshotID = snaps[0].ID
+        if finalSnapshotID == "" {
+            finalSnapshotID = snaps[0].ShortID
+        }
+        if finalSnapshotID != "" {
+            _, stderr, tagErr := runRestic(ctx, repo, req.EncryptionKey, "tag", "--add", lockedTag, "--add", archivedTag, finalSnapshotID)
+            if tagErr != nil {
+                errorJSON(c, http.StatusBadGateway, string(stderr))
+                return
+            }
+            finalSnapshotLocked = true
+        }
+    }
+
+    size, _ := repoDiskSize(repo)
+
+    if err := os.MkdirAll(filepath.Dir(archivePath), 0o700); err != nil {
+        errorJSON(c, http.StatusInternalServerError, err.Error())
+        return
+    }
+    if _, err := os.Stat(archivePath); err == nil {
+        archivePath = archivePath + "-" + time.Now().UTC().Format("20060102-150405")
+    }
+    if err := os.Rename(repo, archivePath); err != nil {
+        errorJSON(c, http.StatusInternalServerError, err.Error())
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "message": "repo archived",
+        "archive_path": archivePath,
+        "repo_name": filepath.Base(archivePath),
+        "final_backup_created": finalBackupCreated,
+        "final_snapshot_locked": finalSnapshotLocked,
+        "final_snapshot_id": finalSnapshotID,
+        "repo_size_bytes": size,
+        "backup_message": backupMessage,
+    })
 }
