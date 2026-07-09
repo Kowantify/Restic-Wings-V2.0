@@ -425,7 +425,123 @@ func repoSize(c *gin.Context) {
         }
         return nil
     })
-    c.JSON(http.StatusOK, gin.H{"exists": size > 0, "total_bytes": size, "repos": []gin.H{{"name": filepath.Base(repo), "size_bytes": size}}})
+	c.JSON(http.StatusOK, gin.H{"exists": size > 0, "total_bytes": size, "repos": []gin.H{{"name": filepath.Base(repo), "size_bytes": size}}})
+}
+
+func repoInventory(c *gin.Context) {
+	liveRepos, err := listRepoDirs(repoRoot(), map[string]bool{
+		"archive": true,
+		"temp":    true,
+	})
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	archivedRepos, err := listRepoDirs(archiveRoot(), nil)
+	if err != nil && !os.IsNotExist(err) {
+		errorJSON(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"repo_root":      repoRoot(),
+		"archive_root":   archiveRoot(),
+		"live_repos":     liveRepos,
+		"archived_repos": archivedRepos,
+	})
+}
+
+func listRepoDirs(root string, skip map[string]bool) ([]gin.H, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []gin.H{}, nil
+		}
+		return nil, err
+	}
+
+	repos := make([]gin.H, 0)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		if skip != nil && skip[name] {
+			continue
+		}
+
+		path, err := cleanUnder(root, filepath.Join(root, name))
+		if err != nil {
+			continue
+		}
+
+		info, err := entry.Info()
+		modified := ""
+		if err == nil {
+			modified = info.ModTime().UTC().Format(time.RFC3339)
+		}
+
+		_, configErr := os.Stat(filepath.Join(path, "config"))
+		repos = append(repos, gin.H{
+			"name":       name,
+			"path":       path,
+			"has_config": configErr == nil,
+			"modified":   modified,
+		})
+	}
+
+	return repos, nil
+}
+
+func archiveRepoByName(c *gin.Context) {
+	req, err := bindResticRequest(c, false)
+	if err != nil {
+		errorJSON(c, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	repoName := strings.TrimSpace(req.RepoName)
+	if repoName == "" || !safeRepo.MatchString(repoName) || strings.Contains(repoName, "..") {
+		errorJSON(c, http.StatusUnprocessableEntity, "invalid repo name")
+		return
+	}
+
+	root := repoRoot()
+	source, err := cleanUnder(root, filepath.Join(root, repoName))
+	if err != nil {
+		errorJSON(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := os.Stat(filepath.Join(source, "config")); err != nil {
+		errorJSON(c, http.StatusNotFound, "repo was not found or is not a valid restic repo")
+		return
+	}
+
+	archiveRootPath := archiveRoot()
+	target, err := cleanUnder(archiveRootPath, filepath.Join(archiveRootPath, repoName))
+	if err != nil {
+		errorJSON(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		errorJSON(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, err := os.Stat(target); err == nil {
+		target = target + "-" + time.Now().UTC().Format("20060102-150405")
+	}
+	if err := os.Rename(source, target); err != nil {
+		errorJSON(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":      "repo moved to archive",
+		"repo_name":    filepath.Base(target),
+		"archive_path": target,
+	})
 }
 
 func deleteRepo(c *gin.Context) {

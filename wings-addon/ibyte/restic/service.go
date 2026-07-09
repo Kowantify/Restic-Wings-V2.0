@@ -24,6 +24,7 @@ import (
 
 var safeID = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 var safeOwner = regexp.MustCompile(`^[A-Za-z0-9_.@-]{1,128}$`)
+var safeRepo = regexp.MustCompile(`^[A-Za-z0-9_.:@+-]{1,256}$`)
 
 const lockedTag = "locked"
 
@@ -35,6 +36,7 @@ type resticRequest struct {
 	Delivery      string `json:"delivery" form:"delivery"`
 	ForceSFTP     bool   `json:"force_sftp" form:"force_sftp"`
 	ArchiveFormat string `json:"archive_format" form:"archive_format"`
+	RepoName      string `json:"repo_name" form:"repo_name"`
 	Limit         int    `json:"limit" form:"limit"`
 	Cursor        string `json:"cursor" form:"cursor"`
 	Since         string `json:"since" form:"since"`

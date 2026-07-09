@@ -401,30 +401,9 @@ class resticbackupsExtensionController extends Controller
 
     private function archiveResticRepoOnWings(object $serverRow, ?string $ownerUsername): array
     {
-        $node = \DB::table('nodes')->where('id', $serverRow->node_id)->first();
-        if (!$node) {
-            $this->recordJobFailure($serverRow->uuid, 'archive_repo', 'Node not found');
-            return ['ok' => false, 'error' => 'Node not found.'];
-        }
-
-        $port = property_exists($node, 'daemonListen')
-            ? $node->daemonListen
-            : (property_exists($node, 'daemon_listen') ? $node->daemon_listen : 8080);
-        $nodeApiUrl = 'https://' . $node->fqdn . ':' . $port;
-
-        $encryptedToken = $node->daemon_token ?? null;
-        if (!$encryptedToken) {
-            $this->recordJobFailure($serverRow->uuid, 'archive_repo', 'Node daemon token missing');
-            return ['ok' => false, 'error' => 'Node daemon token missing.'];
-        }
-
-        try {
-            $token = app('encrypter')->decrypt($encryptedToken);
-        } catch (\Exception $e) {
-            $this->recordJobFailure($serverRow->uuid, 'archive_repo', 'Failed to decrypt daemon token', [
-                'exception' => $e->getMessage(),
-            ]);
-            return ['ok' => false, 'error' => 'Failed to decrypt daemon token.'];
+        $daemon = $this->nodeDaemonContext((int) $serverRow->node_id, 'archive_repo', $serverRow->uuid);
+        if (!$daemon['ok']) {
+            return ['ok' => false, 'error' => $daemon['error']];
         }
 
         $encryptionKey = \DB::table('restic')->where('server_uuid', $serverRow->uuid)->value('encryption_key');
@@ -435,10 +414,10 @@ class resticbackupsExtensionController extends Controller
 
         try {
             $client = new \GuzzleHttp\Client(['timeout' => 21600]);
-            $response = $client->post($nodeApiUrl . '/api/servers/' . $serverRow->uuid . '/restic/repo/archive', [
+            $response = $client->post($daemon['url'] . '/api/servers/' . $serverRow->uuid . '/restic/repo/archive', [
                 'http_errors' => false,
                 'headers' => [
-                    'Authorization' => 'Bearer ' . $token,
+                    'Authorization' => 'Bearer ' . $daemon['token'],
                     'Accept'        => 'application/json',
                     'Content-Type'  => 'application/json',
                 ],
@@ -466,6 +445,165 @@ class resticbackupsExtensionController extends Controller
                 'exception' => $e->getMessage(),
             ]);
             return ['ok' => false, 'error' => 'Failed to archive repo on Wings.'];
+        }
+    }
+
+    private function nodeDaemonContext(int $nodeId, string $jobType, ?string $serverUuid = null): array
+    {
+        $node = \DB::table('nodes')->where('id', $nodeId)->first();
+        if (!$node) {
+            if ($serverUuid) {
+                $this->recordJobFailure($serverUuid, $jobType, 'Node not found');
+            }
+            return ['ok' => false, 'error' => 'Node not found.'];
+        }
+
+        $port = property_exists($node, 'daemonListen')
+            ? $node->daemonListen
+            : (property_exists($node, 'daemon_listen') ? $node->daemon_listen : 8080);
+
+        $encryptedToken = $node->daemon_token ?? null;
+        if (!$encryptedToken) {
+            if ($serverUuid) {
+                $this->recordJobFailure($serverUuid, $jobType, 'Node daemon token missing');
+            }
+            return ['ok' => false, 'error' => 'Node daemon token missing.'];
+        }
+
+        try {
+            $token = app('encrypter')->decrypt($encryptedToken);
+        } catch (\Exception $e) {
+            if ($serverUuid) {
+                $this->recordJobFailure($serverUuid, $jobType, 'Failed to decrypt daemon token', [
+                    'exception' => $e->getMessage(),
+                ]);
+            }
+            return ['ok' => false, 'error' => 'Failed to decrypt daemon token.'];
+        }
+
+        return [
+            'ok' => true,
+            'node' => $node,
+            'url' => 'https://' . $node->fqdn . ':' . $port,
+            'token' => $token,
+        ];
+    }
+
+    private function scanNodeRepoInventory(): RedirectResponse
+    {
+        $this->requireAdmin(auth()->user());
+
+        $nodes = \DB::table('nodes')->orderBy('name')->get();
+        $client = new \GuzzleHttp\Client(['timeout' => 120]);
+        $results = [];
+
+        foreach ($nodes as $node) {
+            $probeServer = \DB::table('servers')
+                ->where('node_id', $node->id)
+                ->orderBy('id')
+                ->first();
+
+            if (!$probeServer) {
+                $results[] = [
+                    'node_id' => $node->id,
+                    'node_name' => $node->name ?? ('Node ' . $node->id),
+                    'status' => 'skipped',
+                    'message' => 'No live server exists on this node to authorize the Wings server-scoped inventory route.',
+                ];
+                continue;
+            }
+
+            $daemon = $this->nodeDaemonContext((int) $node->id, 'repo_inventory', $probeServer->uuid);
+            if (!$daemon['ok']) {
+                $results[] = [
+                    'node_id' => $node->id,
+                    'node_name' => $node->name ?? ('Node ' . $node->id),
+                    'status' => 'failed',
+                    'message' => $daemon['error'],
+                ];
+                continue;
+            }
+
+            try {
+                $response = $client->post($daemon['url'] . '/api/servers/' . $probeServer->uuid . '/restic/repo/inventory', [
+                    'http_errors' => false,
+                    'headers' => [
+                        'Authorization' => 'Bearer ' . $daemon['token'],
+                        'Accept'        => 'application/json',
+                        'Content-Type'  => 'application/json',
+                    ],
+                    'json' => [],
+                ]);
+
+                $body = $this->decodeResponseBody($response);
+                $results[] = [
+                    'node_id' => $node->id,
+                    'node_name' => $node->name ?? ('Node ' . $node->id),
+                    'probe_server_uuid' => $probeServer->uuid,
+                    'status' => $response->getStatusCode() >= 300 ? 'failed' : 'ok',
+                    'http_status' => $response->getStatusCode(),
+                    'body' => $body,
+                ];
+            } catch (\Exception $e) {
+                $results[] = [
+                    'node_id' => $node->id,
+                    'node_name' => $node->name ?? ('Node ' . $node->id),
+                    'status' => 'failed',
+                    'message' => $e->getMessage(),
+                ];
+            }
+        }
+
+        return $this->adminToolOutput('Node Repo Inventory', [
+            'nodes' => $results,
+        ]);
+    }
+
+    private function archiveRepoByName(Request $request): RedirectResponse
+    {
+        $this->requireAdmin(auth()->user());
+
+        $nodeId = (int) $request->input('node_id', 0);
+        $repoName = trim((string) $request->input('repo_name', ''));
+        if ($nodeId <= 0 || $repoName === '' || !preg_match('/^[A-Za-z0-9_.:@+-]{1,256}$/', $repoName) || strpos($repoName, '..') !== false) {
+            return redirect()->back()->withErrors(['repo_name' => 'Valid node and repo name are required.']);
+        }
+
+        $probeServer = \DB::table('servers')
+            ->where('node_id', $nodeId)
+            ->orderBy('id')
+            ->first();
+        if (!$probeServer) {
+            return redirect()->back()->withErrors(['node_id' => 'No live server exists on this node to authorize the Wings server-scoped archive route.']);
+        }
+
+        $daemon = $this->nodeDaemonContext($nodeId, 'archive_repo_by_name', $probeServer->uuid);
+        if (!$daemon['ok']) {
+            return redirect()->back()->withErrors(['node_id' => $daemon['error']]);
+        }
+
+        try {
+            $client = new \GuzzleHttp\Client(['timeout' => 300]);
+            $response = $client->post($daemon['url'] . '/api/servers/' . $probeServer->uuid . '/restic/repo/archive-by-name', [
+                'http_errors' => false,
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $daemon['token'],
+                    'Accept'        => 'application/json',
+                    'Content-Type'  => 'application/json',
+                ],
+                'json' => [
+                    'repo_name' => $repoName,
+                ],
+            ]);
+
+            $rawBody = (string) $response->getBody();
+            if ($response->getStatusCode() >= 300) {
+                return redirect()->back()->withErrors(['repo_name' => $rawBody ?: 'Failed to move repo to archive.']);
+            }
+
+            return redirect()->back()->with(['success' => 'Restic repo moved to archive: ' . $repoName]);
+        } catch (\Exception $e) {
+            return redirect()->back()->withErrors(['repo_name' => 'Failed to move repo to archive: ' . $e->getMessage()]);
         }
     }
 
@@ -599,11 +737,23 @@ class resticbackupsExtensionController extends Controller
             ];
         }
 
-        $keyHistoryOptions = \DB::table('restic_key_history')
+        $historicalSearch = trim((string) request()->query('historical_search', ''));
+        $keyHistoryOptionsQuery = \DB::table('restic_key_history')
             ->select('server_uuid', 'owner_username')
             ->selectRaw('MAX(created_at) as latest_created_at')
-            ->groupBy('server_uuid', 'owner_username')
+            ->groupBy('server_uuid', 'owner_username');
+
+        if ($historicalSearch !== '') {
+            $like = '%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $historicalSearch) . '%';
+            $keyHistoryOptionsQuery->where(function ($query) use ($like) {
+                $query->where('server_uuid', 'like', $like)
+                    ->orWhere('owner_username', 'like', $like);
+            });
+        }
+
+        $keyHistoryOptions = $keyHistoryOptionsQuery
             ->orderBy('latest_created_at', 'desc')
+            ->limit($historicalSearch !== '' ? 50 : 5)
             ->get();
 
         $failedJobs = \DB::table('restic_job_history')
@@ -641,6 +791,7 @@ class resticbackupsExtensionController extends Controller
             'guide'     => $guideContents,
             'repoMultiplier' => $repoMultiplier,
             'keyHistoryOptions' => $keyHistoryOptions,
+            'historicalSearch' => $historicalSearch,
             'failedJobs' => $failedJobs,
         ]);
     }
@@ -828,6 +979,12 @@ class resticbackupsExtensionController extends Controller
         $this->requireAdmin(auth()->user());
 
         $action = $request->input('action');
+        if ($action === 'admin_repo_inventory') {
+            return $this->scanNodeRepoInventory();
+        }
+        if ($action === 'admin_archive_repo_by_name') {
+            return $this->archiveRepoByName($request);
+        }
         if (is_string($action) && strpos($action, 'admin_') === 0) {
             return $this->handleAdminTool($request);
         }

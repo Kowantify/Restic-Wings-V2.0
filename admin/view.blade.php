@@ -104,7 +104,104 @@
             <p><strong>Status:</strong> {{ data_get($toolPayload, 'status') }}</p>
             @if(data_get($body, 'message'))<p><strong>Message:</strong> {{ data_get($body, 'message') }}</p>@endif
             @if(data_get($body, 'error'))<p class="text-danger"><strong>Error:</strong> {{ data_get($body, 'error') }}</p>@endif
-            <pre class="restic-result-pre">{{ json_encode($body, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) }}</pre>          @elseif(($toolTitle === 'Unlock Repo' || $toolTitle === 'Force Unlock Repo') && is_array($toolPayload))
+            <pre class="restic-result-pre">{{ json_encode($body, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) }}</pre>
+          @elseif($toolTitle === 'Node Repo Inventory' && is_array($toolPayload))
+            @php $nodes = data_get($toolPayload, 'nodes', []); @endphp
+            @if(count($nodes))
+              @foreach($nodes as $node)
+                @php
+                  $status = data_get($node, 'status', 'unknown');
+                  $body = data_get($node, 'body', []);
+                  $liveRepos = data_get($body, 'live_repos', []);
+                  $archivedRepos = data_get($body, 'archived_repos', []);
+                @endphp
+                <div class="panel panel-default">
+                  <div class="panel-heading">
+                    <strong>{{ data_get($node, 'node_name', 'Unknown node') }}</strong>
+                    <span class="label label-{{ $status === 'ok' ? 'success' : ($status === 'skipped' ? 'default' : 'danger') }}">{{ $status }}</span>
+                    @if(data_get($node, 'probe_server_uuid'))
+                      <span class="text-muted">via <code>{{ data_get($node, 'probe_server_uuid') }}</code></span>
+                    @endif
+                  </div>
+                  <div class="panel-body">
+                    @if(data_get($node, 'message'))
+                      <p class="text-muted">{{ data_get($node, 'message') }}</p>
+                    @endif
+                    @if($status === 'ok')
+                      <p class="text-muted small">
+                        Live root: <code>{{ data_get($body, 'repo_root') }}</code><br>
+                        Archive root: <code>{{ data_get($body, 'archive_root') }}</code>
+                      </p>
+                      <div class="row">
+                        <div class="col-xs-12 col-md-6">
+                          <h4>Live Repos</h4>
+                          @if(count($liveRepos))
+                            <div class="table-responsive" style="max-height:220px; overflow:auto;">
+                              <table class="table table-condensed">
+                                <thead><tr><th>Name</th><th>Config</th><th>Modified</th><th>Action</th></tr></thead>
+                                <tbody>
+                                  @foreach($liveRepos as $repo)
+                                    <tr>
+                                      <td style="word-break:break-all;"><code>{{ data_get($repo, 'name') }}</code></td>
+                                      <td>{!! data_get($repo, 'has_config') ? '<span class="label label-success">yes</span>' : '<span class="label label-warning">no</span>' !!}</td>
+                                      <td class="text-muted small">{{ data_get($repo, 'modified') }}</td>
+                                      <td>
+                                        @if(data_get($repo, 'has_config'))
+                                          <form method="POST" action="/admin/extensions/resticbackups" style="display:inline;">
+                                            @csrf
+                                            <input type="hidden" name="node_id" value="{{ data_get($node, 'node_id') }}">
+                                            <input type="hidden" name="repo_name" value="{{ data_get($repo, 'name') }}">
+                                            <button
+                                              type="submit"
+                                              class="btn btn-xs btn-warning"
+                                              name="action"
+                                              value="admin_archive_repo_by_name"
+                                              onclick="return confirm('Move this live Restic repo directory into the archive folder?');"
+                                            >Move to Archive</button>
+                                          </form>
+                                        @else
+                                          <span class="text-muted small">invalid repo</span>
+                                        @endif
+                                      </td>
+                                    </tr>
+                                  @endforeach
+                                </tbody>
+                              </table>
+                            </div>
+                          @else
+                            <p class="text-muted">No live Restic repos found.</p>
+                          @endif
+                        </div>
+                        <div class="col-xs-12 col-md-6">
+                          <h4>Archived Repos</h4>
+                          @if(count($archivedRepos))
+                            <div class="table-responsive" style="max-height:220px; overflow:auto;">
+                              <table class="table table-condensed">
+                                <thead><tr><th>Name</th><th>Config</th><th>Modified</th></tr></thead>
+                                <tbody>
+                                  @foreach($archivedRepos as $repo)
+                                    <tr>
+                                      <td style="word-break:break-all;"><code>{{ data_get($repo, 'name') }}</code></td>
+                                      <td>{!! data_get($repo, 'has_config') ? '<span class="label label-success">yes</span>' : '<span class="label label-warning">no</span>' !!}</td>
+                                      <td class="text-muted small">{{ data_get($repo, 'modified') }}</td>
+                                    </tr>
+                                  @endforeach
+                                </tbody>
+                              </table>
+                            </div>
+                          @else
+                            <p class="text-muted">No archived Restic repos found.</p>
+                          @endif
+                        </div>
+                      </div>
+                    @endif
+                  </div>
+                </div>
+              @endforeach
+            @else
+              <span class="text-muted">No node inventory returned.</span>
+            @endif
+          @elseif(($toolTitle === 'Unlock Repo' || $toolTitle === 'Force Unlock Repo') && is_array($toolPayload))
             @php $body = data_get($toolPayload, 'body', []); @endphp
             <p><strong>Status:</strong> {{ data_get($toolPayload, 'status') }}</p>
             <p><strong>Message:</strong> {{ data_get($body, 'message', data_get($body, 'error', 'No message returned.')) }}</p>
@@ -256,7 +353,31 @@
     <div class="box box-default">
       <div class="box-header with-border"><h3 class="box-title">Archived / Historical Servers</h3></div>
       <div class="box-body">
-        <p class="text-muted small">Recovery candidates are based on preserved key history. Older deleted servers can be recovered if their repo still exists in the node archive folder.</p>
+        <p class="text-muted small">Actual archived repos are discovered from Wings only when you scan nodes. Historical key records are separate and only prove that a key was preserved.</p>
+        <form method="POST" action="/admin/extensions/resticbackups" style="margin-bottom:14px;">
+          @csrf
+          <button type="submit" class="btn btn-info" name="action" value="admin_repo_inventory">Scan Actual Node Repos</button>
+          <span class="text-muted small">Lists live leftovers and actual archived Restic repo directories that physically exist on each node.</span>
+        </form>
+        <form method="GET" action="/admin/extensions/resticbackups" style="margin-bottom:14px;">
+          <div class="row">
+            <div class="col-xs-12 col-md-7">
+              <label class="control-label">Search history</label>
+              <input
+                class="form-control"
+                name="historical_search"
+                placeholder="Search by server UUID or owner username"
+                value="{{ $historicalSearch ?? '' }}"
+              >
+            </div>
+            <div class="col-xs-12 col-md-5" style="padding-top:25px;">
+              <button type="submit" class="btn btn-primary">Search</button>
+              @if(!empty($historicalSearch))
+                <a href="/admin/extensions/resticbackups" class="btn btn-default">Clear</a>
+              @endif
+            </div>
+          </div>
+        </form>
         @if(isset($keyHistoryOptions) && $keyHistoryOptions->count())
           <form method="POST" action="/admin/extensions/resticbackups" style="margin-bottom:14px;">
             @csrf
@@ -277,7 +398,9 @@
                       <option value="{{ $row->server_uuid }}">{{ $row->owner_username ?: 'Unknown owner' }} - latest key {{ $row->latest_created_at }}</option>
                     @endforeach
                   </datalist>
-                  <p class="help-block">Use this for deleted servers or old repos. It reads from preserved Restic key history, not the live server table.</p>
+                  <p class="help-block">
+                    Use this to recover preserved keys. This list shows {{ empty($historicalSearch) ? 'the 5 most recent historical key records' : 'matching historical key records' }}.
+                  </p>
                 </div>
               </div>
               <div class="col-xs-12 col-md-5" style="padding-top:25px;">
@@ -286,19 +409,22 @@
               </div>
             </div>
           </form>
-          <div class="table-responsive" style="max-height:360px; overflow:auto;">
+          <div class="table-responsive" style="max-height:260px; overflow:auto;">
             <table class="table table-condensed">
-              <thead><tr><th>Server UUID</th><th>Last Known Owner</th><th>Expected Archive Path</th><th>Latest Key Record</th></tr></thead>
+              <thead>
+                <tr>
+                  <th colspan="3">{{ empty($historicalSearch) ? 'Recent Historical Key Records' : 'Historical Key Search Results' }}</th>
+                </tr>
+                <tr><th>Server UUID</th><th>Last Known Owner</th><th>Latest Key Record</th></tr>
+              </thead>
               <tbody>
                 @foreach($keyHistoryOptions as $row)
                   @php
                     $owner = $row->owner_username ?: 'unknown';
-                    $repoName = $row->owner_username ? $row->server_uuid . '+' . $row->owner_username : $row->server_uuid;
                   @endphp
                   <tr>
                     <td><code>{{ $row->server_uuid }}</code></td>
                     <td>{{ $owner }}</td>
-                    <td style="word-break:break-all;"><code>/var/lib/pterodactyl/restic/archive/{{ $repoName }}</code></td>
                     <td class="text-muted small">{{ $row->latest_created_at }}</td>
                   </tr>
                 @endforeach
