@@ -1,6 +1,6 @@
 @php
   $currentToolTitle = session('admin_tool_title', 'Result');
-  $isInventoryModal = session('admin_tool_output') && in_array($currentToolTitle, ['Node Repo Inventory', 'Live Restic Repos', 'Archived Restic Repos'], true);
+  $isInventoryModal = session('admin_tool_output') && in_array($currentToolTitle, ['Node Repo Inventory', 'Live Restic Repos', 'Dormant Restic Repos', 'Archived Restic Repos'], true);
 @endphp
 
 @if($isInventoryModal)
@@ -120,7 +120,7 @@
             @if(data_get($body, 'message'))<p><strong>Message:</strong> {{ data_get($body, 'message') }}</p>@endif
             @if(data_get($body, 'error'))<p class="text-danger"><strong>Error:</strong> {{ data_get($body, 'error') }}</p>@endif
             <pre class="restic-result-pre">{{ json_encode($body, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) }}</pre>
-          @elseif(in_array($toolTitle, ['Node Repo Inventory', 'Live Restic Repos', 'Archived Restic Repos'], true) && is_array($toolPayload))
+          @elseif(in_array($toolTitle, ['Node Repo Inventory', 'Live Restic Repos', 'Dormant Restic Repos', 'Archived Restic Repos'], true) && is_array($toolPayload))
             @php
               $nodes = data_get($toolPayload, 'nodes', []);
               $inventoryView = data_get($toolPayload, 'inventory_view', 'all');
@@ -155,12 +155,25 @@
                       <div class="row">
                         @if($showLiveRepos)
                         <div class="col-xs-12 {{ $showArchivedRepos ? 'col-md-6' : '' }}">
-                          <h4>Live Restic Repos</h4>
-                          <p class="text-muted small">Repos currently stored in the node live repo directory. This view is display-only to avoid accidentally archiving an active server.</p>
+                          <h4>{{ $inventoryView === 'dormant' ? 'Dormant Restic Repos' : 'Live Restic Repos' }}</h4>
+                          <p class="text-muted small">
+                            @if($inventoryView === 'dormant')
+                              Repos still in the live repo directory that do not match an active server row. These usually come from normal server deletion without archive/delete.
+                            @else
+                              Repos currently stored in the node live repo directory. This view is display-only to avoid accidentally archiving an active server.
+                            @endif
+                          </p>
                           @if(count($liveRepos))
                             <div class="table-responsive" style="max-height:220px; overflow:auto;">
                               <table class="table table-condensed restic-inventory-table">
-                                <thead><tr><th>Name</th><th>Status</th><th>Last Modified</th></tr></thead>
+                                <thead>
+                                  <tr>
+                                    <th>Name</th>
+                                    <th>Status</th>
+                                    <th>Last Modified</th>
+                                    @if($inventoryView === 'dormant')<th>Action</th>@endif
+                                  </tr>
+                                </thead>
                                 <tbody>
                                   @foreach($liveRepos as $repo)
                                     <tr>
@@ -182,6 +195,26 @@
                                         @endif
                                       </td>
                                       <td class="text-muted small">{{ data_get($repo, 'modified') ?: 'unknown' }}</td>
+                                      @if($inventoryView === 'dormant')
+                                        <td>
+                                          @if(data_get($repo, 'has_config'))
+                                            <form method="POST" action="/admin/extensions/resticbackups" style="display:inline;">
+                                              @csrf
+                                              <input type="hidden" name="node_id" value="{{ data_get($node, 'node_id') }}">
+                                              <input type="hidden" name="repo_name" value="{{ data_get($repo, 'name') }}">
+                                              <button
+                                                type="submit"
+                                                class="btn btn-xs btn-warning"
+                                                name="action"
+                                                value="admin_archive_repo_by_name"
+                                                onclick="return confirm('Move this dormant Restic repo into the archive folder?');"
+                                              >Archive Dormant Repo</button>
+                                            </form>
+                                          @else
+                                            <span class="text-muted small">invalid repo</span>
+                                          @endif
+                                        </td>
+                                      @endif
                                     </tr>
                                   @endforeach
                                 </tbody>
@@ -298,6 +331,11 @@
           @csrf
           <button type="submit" class="btn btn-info" name="action" value="admin_live_repo_inventory">View Active Live Repos</button>
           <span class="text-muted small">Lists only non-archived Restic repos attached to active servers.</span>
+        </form>
+        <form method="POST" action="/admin/extensions/resticbackups">
+          @csrf
+          <button type="submit" class="btn btn-warning" name="action" value="admin_dormant_repo_inventory">Check Dormant Repos</button>
+          <span class="text-muted small">Finds non-archived Restic repos that are no longer attached to a live server.</span>
         </form>
       </div>
     </div>

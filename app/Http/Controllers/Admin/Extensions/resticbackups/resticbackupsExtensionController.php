@@ -586,6 +586,11 @@ class resticbackupsExtensionController extends Controller
                             return (bool) data_get($repo, 'attached');
                         }));
                         $body['archived_repos'] = [];
+                    } elseif ($view === 'dormant') {
+                        $body['live_repos'] = array_values(array_filter($body['live_repos'] ?? [], function ($repo) {
+                            return !(bool) data_get($repo, 'attached');
+                        }));
+                        $body['archived_repos'] = [];
                     } elseif ($view === 'archived') {
                         $body['live_repos'] = [];
                     }
@@ -610,7 +615,7 @@ class resticbackupsExtensionController extends Controller
 
         $title = $view === 'live'
             ? 'Live Restic Repos'
-            : ($view === 'archived' ? 'Archived Restic Repos' : 'Node Repo Inventory');
+            : ($view === 'dormant' ? 'Dormant Restic Repos' : ($view === 'archived' ? 'Archived Restic Repos' : 'Node Repo Inventory'));
 
         return $this->adminToolOutput($title, [
             'inventory_view' => $view,
@@ -670,6 +675,23 @@ class resticbackupsExtensionController extends Controller
         $repoName = trim((string) $request->input('repo_name', ''));
         if ($nodeId <= 0 || $repoName === '' || !preg_match('/^[A-Za-z0-9_.:@+-]{1,256}$/', $repoName) || strpos($repoName, '..') !== false) {
             return redirect()->back()->withErrors(['repo_name' => 'Valid node and repo name are required.']);
+        }
+
+        $repoUuid = explode('+', $repoName, 2)[0];
+        $liveServers = \DB::table('servers')
+            ->leftJoin('users', 'servers.owner_id', '=', 'users.id')
+            ->where('servers.node_id', $nodeId)
+            ->select('servers.uuid', 'users.username as owner_username')
+            ->get();
+
+        foreach ($liveServers as $liveServer) {
+            $uuid = (string) $liveServer->uuid;
+            $owner = (string) ($liveServer->owner_username ?? '');
+            if ($repoName === $uuid || $repoUuid === $uuid || ($owner !== '' && $repoName === $uuid . '+' . $owner)) {
+                return redirect()->back()->withErrors([
+                    'repo_name' => 'This repo still appears to be attached to a live server. Use Archive Backup + Delete Server instead.',
+                ]);
+            }
         }
 
         $probeServer = \DB::table('servers')
@@ -1078,11 +1100,17 @@ class resticbackupsExtensionController extends Controller
         if ($action === 'admin_live_repo_inventory') {
             return $this->scanNodeRepoInventory('live');
         }
+        if ($action === 'admin_dormant_repo_inventory') {
+            return $this->scanNodeRepoInventory('dormant');
+        }
         if ($action === 'admin_archived_repo_inventory') {
             return $this->scanNodeRepoInventory('archived');
         }
         if ($action === 'admin_repo_inventory') {
             return $this->scanNodeRepoInventory('all');
+        }
+        if ($action === 'admin_archive_repo_by_name') {
+            return $this->archiveRepoByName($request);
         }
         if (is_string($action) && strpos($action, 'admin_') === 0) {
             return $this->handleAdminTool($request);
