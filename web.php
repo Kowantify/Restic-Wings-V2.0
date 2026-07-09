@@ -62,6 +62,9 @@ Route::middleware(['auth'])->group(function () {
     Route::get('/admin/encryption-key', [resticbackupsExtensionController::class, 'adminGetEncryptionKey']);
     Route::get('/admin/key-history', [resticbackupsExtensionController::class, 'adminGetKeyHistory']);
 
+    Route::post('/admin/servers/{server}/archive-delete', [resticbackupsExtensionController::class, 'archiveAndDeleteServer'])
+        ->name('extensions.resticbackups.archiveDeleteServer');
+
     Route::post('/admin/extensions/resticbackups', [resticbackupsExtensionController::class, 'post'])
         ->name('extensions.resticbackups.post');
 });

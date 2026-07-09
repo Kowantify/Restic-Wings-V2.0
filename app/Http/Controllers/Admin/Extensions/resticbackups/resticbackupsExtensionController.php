@@ -8,6 +8,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Pterodactyl\BlueprintFramework\Libraries\ExtensionLibrary\Admin\BlueprintAdminLibrary as BlueprintExtensionLibrary;
 use Pterodactyl\Models\Permission;
+use Pterodactyl\Models\Server;
 use Illuminate\Support\Facades\Schema;
 
 class resticbackupsExtensionController extends Controller
@@ -399,6 +400,48 @@ class resticbackupsExtensionController extends Controller
         return redirect()->back()->with(['success' => 'Restic repo archived on Wings.']);
     }
 
+    public function archiveAndDeleteServer($server, Request $request): RedirectResponse
+    {
+        $this->requireAdmin(auth()->user());
+
+        $serverModel = Server::query()->where('id', $server)->first();
+        if (!$serverModel) {
+            return redirect()->back()->withErrors(['server' => 'Server not found.']);
+        }
+
+        $serverRow = \DB::table('servers')->where('id', $serverModel->id)->first();
+        if (!$serverRow) {
+            return redirect()->back()->withErrors(['server' => 'Server not found.']);
+        }
+
+        $ownerUsername = $this->getResticOwnerUsername($serverRow);
+        $archiveResult = $this->archiveResticRepoOnWings($serverRow, $ownerUsername);
+        if (!$archiveResult['ok']) {
+            return redirect()->back()->withErrors([
+                'server' => $archiveResult['error'] ?? 'Restic archive failed. Server was not deleted.',
+            ]);
+        }
+
+        try {
+            $service = app(\Pterodactyl\Services\Servers\ServerDeletionService::class);
+            $method = new \ReflectionMethod($service, 'handle');
+            if ($method->getNumberOfParameters() >= 2) {
+                $service->handle($serverModel, false);
+            } else {
+                $service->handle($serverModel);
+            }
+        } catch (\Throwable $e) {
+            $this->recordJobFailure($serverRow->uuid, 'archive_delete_server', $e->getMessage(), [
+                'exception' => $e->getMessage(),
+            ]);
+            return redirect()->back()->withErrors([
+                'server' => 'Restic repo was archived, but server deletion failed: ' . $e->getMessage(),
+            ]);
+        }
+
+        return redirect('/admin/servers')->with('success', 'Restic repo archived and server deleted.');
+    }
+
     private function archiveResticRepoOnWings(object $serverRow, ?string $ownerUsername): array
     {
         $daemon = $this->nodeDaemonContext((int) $serverRow->node_id, 'archive_repo', $serverRow->uuid);
@@ -489,7 +532,7 @@ class resticbackupsExtensionController extends Controller
         ];
     }
 
-    private function scanNodeRepoInventory(): RedirectResponse
+    private function scanNodeRepoInventory(string $view = 'all'): RedirectResponse
     {
         $this->requireAdmin(auth()->user());
 
@@ -538,6 +581,14 @@ class resticbackupsExtensionController extends Controller
                 $body = $this->decodeResponseBody($response);
                 if ($response->getStatusCode() < 300 && is_array($body)) {
                     $body = $this->annotateRepoInventory((int) $node->id, $body);
+                    if ($view === 'live') {
+                        $body['live_repos'] = array_values(array_filter($body['live_repos'] ?? [], function ($repo) {
+                            return (bool) data_get($repo, 'attached');
+                        }));
+                        $body['archived_repos'] = [];
+                    } elseif ($view === 'archived') {
+                        $body['live_repos'] = [];
+                    }
                 }
                 $results[] = [
                     'node_id' => $node->id,
@@ -557,7 +608,12 @@ class resticbackupsExtensionController extends Controller
             }
         }
 
-        return $this->adminToolOutput('Node Repo Inventory', [
+        $title = $view === 'live'
+            ? 'Live Restic Repos'
+            : ($view === 'archived' ? 'Archived Restic Repos' : 'Node Repo Inventory');
+
+        return $this->adminToolOutput($title, [
+            'inventory_view' => $view,
             'nodes' => $results,
         ]);
     }
@@ -1019,11 +1075,14 @@ class resticbackupsExtensionController extends Controller
         $this->requireAdmin(auth()->user());
 
         $action = $request->input('action');
-        if ($action === 'admin_repo_inventory') {
-            return $this->scanNodeRepoInventory();
+        if ($action === 'admin_live_repo_inventory') {
+            return $this->scanNodeRepoInventory('live');
         }
-        if ($action === 'admin_archive_repo_by_name') {
-            return $this->archiveRepoByName($request);
+        if ($action === 'admin_archived_repo_inventory') {
+            return $this->scanNodeRepoInventory('archived');
+        }
+        if ($action === 'admin_repo_inventory') {
+            return $this->scanNodeRepoInventory('all');
         }
         if (is_string($action) && strpos($action, 'admin_') === 0) {
             return $this->handleAdminTool($request);
@@ -1033,9 +1092,6 @@ class resticbackupsExtensionController extends Controller
         }
         if ($action === 'delete_repo') {
             return $this->deleteResticRepo($request);
-        }
-        if ($action === 'archive_repo') {
-            return $this->archiveResticRepo($request);
         }
         if ($action === 'save_repo_multiplier') {
             $value = $request->input('repo_multiplier');

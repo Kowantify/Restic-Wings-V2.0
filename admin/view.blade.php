@@ -105,8 +105,13 @@
             @if(data_get($body, 'message'))<p><strong>Message:</strong> {{ data_get($body, 'message') }}</p>@endif
             @if(data_get($body, 'error'))<p class="text-danger"><strong>Error:</strong> {{ data_get($body, 'error') }}</p>@endif
             <pre class="restic-result-pre">{{ json_encode($body, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) }}</pre>
-          @elseif($toolTitle === 'Node Repo Inventory' && is_array($toolPayload))
-            @php $nodes = data_get($toolPayload, 'nodes', []); @endphp
+          @elseif(in_array($toolTitle, ['Node Repo Inventory', 'Live Restic Repos', 'Archived Restic Repos'], true) && is_array($toolPayload))
+            @php
+              $nodes = data_get($toolPayload, 'nodes', []);
+              $inventoryView = data_get($toolPayload, 'inventory_view', 'all');
+              $showLiveRepos = $inventoryView !== 'archived';
+              $showArchivedRepos = $inventoryView !== 'live';
+            @endphp
             @if(count($nodes))
               @foreach($nodes as $node)
                 @php
@@ -133,12 +138,14 @@
                         Archive root: <code>{{ data_get($body, 'archive_root') }}</code>
                       </p>
                       <div class="row">
-                        <div class="col-xs-12 col-md-6">
-                          <h4>Live Repos</h4>
+                        @if($showLiveRepos)
+                        <div class="col-xs-12 {{ $showArchivedRepos ? 'col-md-6' : '' }}">
+                          <h4>Live Restic Repos</h4>
+                          <p class="text-muted small">Repos currently stored in the node live repo directory. This view is display-only to avoid accidentally archiving an active server.</p>
                           @if(count($liveRepos))
                             <div class="table-responsive" style="max-height:220px; overflow:auto;">
                               <table class="table table-condensed restic-inventory-table">
-                                <thead><tr><th>Name</th><th>Status</th><th>Last Modified</th><th>Action</th></tr></thead>
+                                <thead><tr><th>Name</th><th>Status</th><th>Last Modified</th></tr></thead>
                                 <tbody>
                                   @foreach($liveRepos as $repo)
                                     <tr>
@@ -160,24 +167,6 @@
                                         @endif
                                       </td>
                                       <td class="text-muted small">{{ data_get($repo, 'modified') ?: 'unknown' }}</td>
-                                      <td>
-                                        @if(data_get($repo, 'has_config'))
-                                          <form method="POST" action="/admin/extensions/resticbackups" style="display:inline;">
-                                            @csrf
-                                            <input type="hidden" name="node_id" value="{{ data_get($node, 'node_id') }}">
-                                            <input type="hidden" name="repo_name" value="{{ data_get($repo, 'name') }}">
-                                            <button
-                                              type="submit"
-                                              class="btn btn-xs btn-warning"
-                                              name="action"
-                                              value="admin_archive_repo_by_name"
-                                              onclick="return confirm('Move this live Restic repo directory into the archive folder?');"
-                                            >Move to Archive</button>
-                                          </form>
-                                        @else
-                                          <span class="text-muted small">invalid repo</span>
-                                        @endif
-                                      </td>
                                     </tr>
                                   @endforeach
                                 </tbody>
@@ -187,8 +176,11 @@
                             <p class="text-muted">No live Restic repos found.</p>
                           @endif
                         </div>
-                        <div class="col-xs-12 col-md-6">
-                          <h4>Archived Repos</h4>
+                        @endif
+                        @if($showArchivedRepos)
+                        <div class="col-xs-12 {{ $showLiveRepos ? 'col-md-6' : '' }}">
+                          <h4>Archived Restic Repos</h4>
+                          <p class="text-muted small">Repos physically present in the node archive directory.</p>
                           @if(count($archivedRepos))
                             <div class="table-responsive" style="max-height:220px; overflow:auto;">
                               <table class="table table-condensed restic-inventory-table">
@@ -208,6 +200,7 @@
                             <p class="text-muted">No archived Restic repos found.</p>
                           @endif
                         </div>
+                        @endif
                       </div>
                     @endif
                   </div>
@@ -281,6 +274,12 @@
           <button type="submit" class="btn btn-primary" name="action" value="admin_health_check">Run Health Check</button>
           <button type="submit" class="btn btn-default" name="action" value="admin_locks">Check Locks</button>
         </form>
+        <hr>
+        <form method="POST" action="/admin/extensions/resticbackups">
+          @csrf
+          <button type="submit" class="btn btn-info" name="action" value="admin_live_repo_inventory">View Active Live Repos</button>
+          <span class="text-muted small">Lists only non-archived Restic repos attached to active servers.</span>
+        </form>
       </div>
     </div>
   </div>
@@ -327,7 +326,6 @@
           </div>
           <button type="submit" class="btn btn-warning" name="action" value="admin_unlock_repo" onclick="return confirm('Unlock this repository?');">Unlock Repo</button>
           <button type="submit" class="btn btn-danger" name="action" value="admin_force_unlock_repo" onclick="return confirm('Force unlock only if no backup is running. Continue?');">Force Unlock Repo</button>
-          <button type="submit" class="btn btn-warning" name="action" value="archive_repo" onclick="return confirm('Create a final locked backup if possible and move this repo to the archive folder?');">Archive Repo</button>
           <button type="submit" class="btn btn-danger" name="action" value="generate_key" onclick="return confirm('Generate a new encryption key? Existing backups may become unrecoverable if the old key is lost.');">Generate New Key</button>
           <button type="submit" class="btn btn-danger" name="action" value="delete_repo" onclick="return confirm('Delete this server Restic repository? This cannot be undone.');">Delete Repo</button>
         </form>
@@ -368,11 +366,11 @@
     <div class="box box-default">
       <div class="box-header with-border"><h3 class="box-title">Archived / Historical Servers</h3></div>
       <div class="box-body">
-        <p class="text-muted small">Actual archived repos are discovered from Wings only when you scan nodes. Historical key records are separate and only prove that a key was preserved.</p>
+        <p class="text-muted small">Actual archived repos are discovered from Wings only when requested. Historical key records are separate and only prove that a key was preserved.</p>
         <form method="POST" action="/admin/extensions/resticbackups" style="margin-bottom:14px;">
           @csrf
-          <button type="submit" class="btn btn-info" name="action" value="admin_repo_inventory">Scan Actual Node Repos</button>
-          <span class="text-muted small">Lists live leftovers and actual archived Restic repo directories that physically exist on each node.</span>
+          <button type="submit" class="btn btn-info" name="action" value="admin_archived_repo_inventory">View Actual Archived Repos</button>
+          <span class="text-muted small">Lists only Restic repo directories that physically exist under each node archive folder.</span>
         </form>
         @if(isset($keyHistoryOptions) && $keyHistoryOptions->count())
           <form method="POST" action="/admin/extensions/resticbackups" style="margin-bottom:14px;">

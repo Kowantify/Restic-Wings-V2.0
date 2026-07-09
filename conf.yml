@@ -14,7 +14,7 @@ admin:
   view: "admin/view.blade.php"
   controller: "app/Http/Controllers/Admin/Extensions/resticbackups/resticbackupsExtensionController.php"
   css: ""
-  wrapper: ""
+  wrapper: "admin/wrapper.blade.php"
 
 dashboard:
   css: ""
